@@ -4,6 +4,8 @@
 
 **基础桌面已经跑通，上游提到的功能尚未全部验证。** 本分支记录现有设备上的适配和回归结果，不代表任意 iOS 17 设备都能直接安装成功。
 
+后续实机反馈：窗口拖动正常；设置空白、浏览器无法正常使用、菜单栏无响应、macOS Wi-Fi/蓝牙控制不可用。桌面画面验证不代表这些功能已完成。以下表格已据此更新。
+
 ## 验证环境
 
 | 项目 | 实际环境 |
@@ -28,17 +30,21 @@
 | 原生 AGX GPU 和最终画面呈现 | 已验证 | 实际 GPU 工作完成和可见像素；尚无“不损失性能”的基准证据 |
 | Launchpad 文件夹和背景模糊 | 已验证 | 修复打开文件夹的崩溃；连续关闭/打开 12 次，真实图标和模糊可见 |
 | Terminal、键盘和指针 | 部分验证 | `whoami` 实际返回 root；原生菜单新建第二个窗口；指针切换焦点。冷启动曾出现 `Login incorrect`，仍需修复和回归 |
-| 系统设置及系统应用 | 部分验证 | 曾观察到 ViewBridge endpoint 无效，部分面板没有形成可见窗口；不能宣称完整可用 |
+| 系统设置及系统应用 | 已知故障 | 用户确认设置空白；日志记录 ViewBridge endpoint 无效及 shader 格式错误；原因尚未完全定位 |
+| 菜单栏交互 | 已知故障 | 用户报告无响应；当前 Terminal 的菜单快照请求超时。早先一次菜单操作成功不能证明持续可用 |
 | 每个应用独立 iOS 窗口、Stage Manager、自动调整尺寸 | 待验证 | 最终合成画面成功不等于独立窗口协议全部成立 |
 | 应用直接 drawable 加速 | 未确认 | Host 的 authority capability/controller identity 仍为 NO；不能以最终画面替代此项验证 |
-| 滚动、选择、拖动/调整窗口、右键、缩放/旋转 | 待完整验证 | 基础点击和焦点已有证据，多指手势及完整组合尚未逐项回归 |
+| 滚动、选择、拖动/调整窗口、右键、缩放/旋转 | 部分验证 | 用户确认窗口拖动正常；基础点击和焦点已有证据，其余手势及完整组合尚未逐项回归 |
 | Mission Control、桌面切换、App Exposé、触屏触控板 | 待验证 | 未完成本环境功能回归 |
 | Magic Keyboard、虚拟键盘、快捷键工具栏、中文输入法 | 待完整验证 | 已验证基础硬件键盘输入；其他输入方式和中文组合输入尚未验证 |
 | 剪贴板、文件共享、拖放、导入导出、打开/保存面板 | 待验证 | 服务端点就绪不能证明用户操作全部成功 |
 | 显示密度、Retina、80–120 Hz、自适应帧率 | 待验证 | 没有本环境完整显示档位和帧率测量 |
 | 硬件视频编解码、音频、定位 | 待验证 | 未完成本环境端到端验证 |
-| Wi-Fi、蓝牙、Apple Pencil、屏幕镜像 | 待验证 | 能通过 SSH 联网不能作为这些 macOS 功能的验证 |
-| VS Code/Electron、浏览器、Steam、Office、游戏 | 待验证 | 不沿用上游其他设备的运行结果 |
+| macOS Wi-Fi/蓝牙控制 | 已报告故障 | 用户确认不可用；iPadOS 的联网、配对与 macOS 面板控制是不同验证项目 |
+| Apple Pencil、屏幕镜像 | 待验证 | 未完成本环境端到端操作 |
+| Safari/浏览器 | 已报告故障 | Safari 形成窗口的日志不能证明网页可用；HTTPS 命令行探针也失败，具体见下文 |
+| VS Code/Electron、Steam、Office、游戏 | 待验证 | 不沿用上游其他设备的运行结果 |
+| Apple ID / iCloud 登录、同步 | 未验证、无明确支持承诺 | 当前上游 README 没有明确声明 iCloud 登录/同步支持；未测试账号操作 |
 | VNC、锁屏/睡眠及恢复 | 待验证 | 当前桌面验证使用 Host 实际画面；VNC 不作为启动成功的必要条件 |
 | 长时间稳定运行、冷启动、全新安装 | 尚未完成 | 当前为已经配置的单台设备上的验证 |
 
@@ -88,4 +94,15 @@ bash /var/jb/usr/macOS/bin/macos_gui.sh stop
 
 ## 下一步
 
-优先解决 Terminal 冷启动和系统设置面板问题，再逐项回归输入、窗口、文件共享及应用。每项功能需有真实操作结果；进程存活、跳过断言或服务返回成功都不能单独作为完成证据。
+优先定位 ViewBridge/设置服务、浏览器网络和菜单响应，再解决 Terminal 冷启动、图标生成及硬件控制问题。文件共享、输入法等仍需逐项回归。每项功能需有真实操作结果；进程存活、跳过断言或服务返回成功都不能单独作为完成证据。
+
+## 2026-10-02 补充功能检查
+
+- **设置**：`SystemSettings.host.log` 实际记录 `com.apple.view-bridge: Connection invalid`；ThemeWidgetControlViewService 的 listener 请求也无效。`settings-bridge ready=yes` 仅证明桥接能力发布，不能证明设置页面可用。
+- **图标**：`iconservicesagent.log` 记录 `This library format is not supported on this platform (or was built with an old version of the tools)`。THEORY：图标生成失败可能关联问号图标；需捕获具体应用的图标请求和失败回复才能确认。
+- **菜单**：当前 Terminal PID 的生产菜单快照协议请求得到 `socket.timeout: timed out`。该结果不证明所有应用的菜单都失败，也未定位到输入路由或主线程中的具体阻塞点。
+- **网络**：chroot 的真实 echo 仍成功。系统 `/usr/bin/curl` 请求 `https://www.apple.com`，设置 `SSL_CERT_FILE=/etc/ssl/cert.pem` 后仍返回 `curl: (60) SSL certificate problem: Couldn't understand the server certificate format`。没有通过关闭证书验证来宣称网络修复。此结果不能单独解释 Safari 的全部故障。
+- **其他应用**：Host 日志记录 Maps 未完成 Catalyst 场景启动；Messages 抛出 `returning nil screen from mainScreen is not allowed!`；Notes 也有 ViewBridge listener 无效记录；Activity Monitor 报 AssetCacheManagerService lookup 失败。尚未完成这些应用的所有用户操作。
+- **iCloud**：查阅当前 macPad 和 MacWSBootingGuide README，未找到明确支持声明。没有读取设备账号、登录信息或尝试同步；现有 iPadOS cloud daemon 的存在不能作为 macOS iCloud 验证。
+
+上述记录来自实际运行系统，调查记录列出了本地证据位置。当前状态仍是适配中的基础桌面，不是完整可用的 macOS 系统。

@@ -1592,3 +1592,45 @@ and Dock PID 54195 both report `runs = 1` and `last exit code = (never exited)`.
 Evidence: `sonoma-launchpad-folder-regression.log` and
 `sonoma-launchpad-folder-fixed-after12.png` under `tmp/sonoma-14.0`.
 This validates this crash path; it does not certify every macOS application.
+
+## Post-desktop feature audit (2026-10-02)
+
+User confirmed window dragging works, and reported blank Settings, unusable
+browser, unresponsive menu bar, unavailable macOS Wi-Fi/Bluetooth controls,
+and question-mark application icons. These replace broader assumptions based
+on desktop presentation with explicit unresolved feature statuses.
+
+Runtime-confirmed via `SystemSettings.host.log`:
+`endpointForReply:withListenerName:replyErrorCode:` reports listener
+`com.apple.view-bridge`: `Connection invalid`. A ThemeWidgetControlViewService
+whole-service listener request also fails. Settings bridge capability reports
+`ready=yes abi=1 capabilities=0x01`; this is not a completed Settings panel.
+The lightweight `ExcUserFault_System Settings-2026-10-02-221514.ips` records
+`XPC_EXIT_REASON_FAULT`, but its PID 56979 remains observable; the report is
+not evidence that the entire process exited.
+
+Runtime-confirmed via `iconservicesagent.log`: Metal library creation reports
+`This library format is not supported on this platform (or was built with an
+old version of the tools)`. THEORY: this may contribute to question-mark
+icons. A correlated per-application icon request/result is still required.
+
+The read-only production menu snapshot request to Terminal PID 58194 times
+out with `socket.timeout: timed out`. This establishes a failed round-trip,
+not its cause or a failure in every application's menu.
+
+`tmp/sonoma-14.0/sonoma-feature-cli-network.log` records a real chroot echo
+and live window catalog. `sonoma-feature-network-full.log` records system
+curl requesting https://www.apple.com with SSL_CERT_FILE=/etc/ssl/cert.pem:
+`curl: (60) SSL certificate problem: Couldn't understand the server certificate format`.
+TLS verification remains enabled; no browser network success is claimed.
+
+`sonoma-feature-audit-20261002.log` captures Host reports for Maps failing
+Catalyst scene startup and Messages exiting with an actual UIScreen assertion:
+`returning nil screen from mainScreen is not allowed!`. Notes also reports
+ViewBridge connection invalid; ActivityMonitor.host.log reports an invalid
+AssetCacheManagerService lookup. These apps are not declared fully usable.
+
+No iCloud account operations were attempted. Current upstream READMEs make no
+explicit iCloud login/sync promise; iPadOS cloud services are not a macOS
+account or synchronization witness. Current feature coverage is in
+`ipados17-macos14-update.md`.
