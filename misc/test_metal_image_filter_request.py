@@ -73,6 +73,16 @@ class MetalImageFilterRequestTests(unittest.TestCase):
     def classify(self, value):
         return self.lib.input_target(value, len(value))
 
+    def test_sonoma_coreui_modules_and_version_mixture(self):
+        # Runtime raw-76600-001-5: two modules with the exact 14.0 target.
+        target = b"air64-apple-macosx14.0.0"
+        value = request([wrapped_module(target)] * 2)
+        self.assertEqual(self.classify(value), 2)
+        self.assertEqual(self.classify(request(
+            [wrapped_module(target), wrapped_module(MACOS)])), 0)
+        for length in range(len(value)):
+            self.assertEqual(self.classify(value[:length]), 0, length)
+
     def test_consistent_supported_targets(self):
         for target, expected in [(MACOS, 1), (CATALYST, 6)]:
             self.assertEqual(self.classify(request([wrapped_module(target)])), expected)

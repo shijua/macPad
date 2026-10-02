@@ -47,6 +47,23 @@ class MetalCacheMigrationTests(unittest.TestCase):
         self.assertEqual(self.migrate(), {"state": "current", "retired_files": 0})
         self.assertEqual((cache / "libraries.data").read_bytes(), b"new-valid-compiled-data")
 
+    def test_sonoma_library_pair_preserved_and_unknown_versions_untouched(self):
+        client = self.root / migration.CACHE_RELATIVE / "com.apple.finder/com.apple.metal"
+        known = client / "32023"
+        unknown = client / "32024"
+        for directory in (known, unknown):
+            directory.mkdir(parents=True)
+            for name in migration.NAMES:
+                (directory / name).write_bytes(b"retained-" + name.encode())
+        before = {name: ((known / name).read_bytes(), migration.stamp(known / name))
+                  for name in migration.NAMES}
+        self.assertEqual(self.migrate()["retired_files"], 2)
+        for name in migration.NAMES:
+            archived = self.root / migration.STATE_RELATIVE / "retired" / migration.SCHEMA / (known / name).relative_to(self.root)
+            self.assertEqual((archived.read_bytes(), migration.stamp(archived)), before[name])
+            self.assertEqual((unknown / name).read_bytes(), b"retained-" + name.encode())
+        self.assertFalse(migration.valid_cache_relative(str((unknown / "libraries.data").relative_to(self.root))))
+
     def test_single_missing_pair_member_and_unrelated_data(self):
         cache = self.cache(names=("libraries.data",))
         (cache / "functions.data").write_bytes(b"unrelated")
@@ -89,7 +106,7 @@ class MetalCacheMigrationTests(unittest.TestCase):
         self.assertFalse(migration.current(self.root))
         self.assertEqual(self.migrate(), {"state": "migrated", "retired_files": 2})
         self.assertEqual(migration.read_json(self.root / migration.STATE_RELATIVE / "schema.json"),
-                         {"schema": "macws-macabi-image-filter-v3"})
+                         {"schema": migration.SCHEMA})
         for name in migration.NAMES:
             archived = (self.root / migration.STATE_RELATIVE / "retired" / migration.SCHEMA /
                         (cache / name).relative_to(self.root))

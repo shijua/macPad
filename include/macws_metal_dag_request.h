@@ -10,12 +10,13 @@
 // +0x79b40: discriminator 14 contains a NUL-terminated DAG followed by
 // optional AIR version, function count, then optional target strings and
 // length-prefixed wrapped AIR modules. Reject truncation/unknown trailers.
-// Recognize only the two runtime-validated input contracts: metal2metal's
-// Catalyst AIR and Ventura CoreImage's native macOS AIR. Every module and
+// Recognize only the runtime-observed input contracts: metal2metal's
+// Catalyst AIR and Ventura/Sonoma CoreImage native macOS AIR. Every module and
 // optional explicit target must agree; ordinary iOS inputs remain untouched.
 typedef enum {
     MacWSMetalDAGInputUnknown = 0,
     MacWSMetalDAGInputMacOS134 = 1,
+    MacWSMetalDAGInputMacOS140 = 2,
     MacWSMetalDAGInputCatalyst = 6,
 } MacWSMetalDAGInputTarget;
 
@@ -23,10 +24,13 @@ static inline MacWSMetalDAGInputTarget MacWSMetalDAGExactTarget(
         const uint8_t *bytes, size_t length) {
     static const char catalyst[] = "air64-apple-ios19.0.0-macabi";
     static const char macos[] = "air64-apple-macosx13.4.0";
+    static const char sonoma[] = "air64-apple-macosx14.0.0";
     if (length == sizeof(catalyst)-1 && !memcmp(bytes, catalyst, length))
         return MacWSMetalDAGInputCatalyst;
     if (length == sizeof(macos)-1 && !memcmp(bytes, macos, length))
         return MacWSMetalDAGInputMacOS134;
+    if (length == sizeof(sonoma)-1 && !memcmp(bytes, sonoma, length))
+        return MacWSMetalDAGInputMacOS140;
     return MacWSMetalDAGInputUnknown;
 }
 
@@ -34,7 +38,8 @@ static inline MacWSMetalDAGInputTarget MacWSMetalDAGModuleTarget(
         const uint8_t *air, size_t size) {
     static const char prefix[] = "air64-apple-";
     static const char *const targets[] = {
-        "air64-apple-ios19.0.0-macabi", "air64-apple-macosx13.4.0"
+        "air64-apple-ios19.0.0-macabi", "air64-apple-macosx13.4.0",
+        "air64-apple-macosx14.0.0"
     };
     MacWSMetalDAGInputTarget result = MacWSMetalDAGInputUnknown;
     for (size_t i = 0; i + sizeof(prefix)-1 <= size; ++i) {

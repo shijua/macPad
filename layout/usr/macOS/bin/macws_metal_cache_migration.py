@@ -1,6 +1,6 @@
 """One-time derived Metal library target revision, never a feature switch.
 
-Only macOS root-user 31001 libraries.list/data pairs are retired. Rename
+Only macOS root-user 31001/32023 libraries.list/data pairs are retired. Rename
 preserves bytes/inodes/permissions, and a recoverable journal permits a
 partial transaction to resume. No shader cache binary format is guessed.
 """
@@ -15,12 +15,14 @@ import stat
 import sys
 import tempfile
 
+# Sonoma 32023 caches retain the earlier iOS-target DAG replies.
 # Kind-5 CoreUI image-filter composition preserves the request bytes/cache key
 # while translating the parsed modules to Catalyst. Caches produced under v2
 # can therefore retain incompatible macOS-target libraries even after the
 # compiler repair. Retire them once at the existing quiescent boundary; this
 # revision never enables the compatibility code and never touches live clients.
-SCHEMA = "macws-macabi-image-filter-v3"
+SCHEMA = "macws-macabi-sonoma-ios17-v4"
+CACHE_VERSIONS = ("31001", "32023")
 CACHE_RELATIVE = Path("private/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/C")
 STATE_RELATIVE = Path("Library/Caches/MacWS/metal-library-target")
 NAMES = ("libraries.list", "libraries.data")
@@ -156,12 +158,13 @@ def candidates(root):
         raise MigrationError("cache-client inventory exceeds bound")
     result = []
     for client in clients:
-        for name in NAMES:
-            relative = (client / "com.apple.metal/31001" / name).relative_to(root)
-            path = checked(root, relative)
-            info = stamp(path)
-            if info is not None:
-                result.append({"path": str(relative), "stat": info})
+        for version in CACHE_VERSIONS:
+            for name in NAMES:
+                relative = (client / "com.apple.metal" / version / name).relative_to(root)
+                path = checked(root, relative)
+                info = stamp(path)
+                if info is not None:
+                    result.append({"path": str(relative), "stat": info})
     return result
 
 
@@ -171,7 +174,7 @@ def valid_cache_relative(value):
         parts = relative.relative_to(CACHE_RELATIVE).parts
     except ValueError:
         return False
-    return (len(parts) in (3, 4, 5) and parts[-3:-1] == ("com.apple.metal", "31001")
+    return (len(parts) in (3, 4, 5) and parts[-3] == "com.apple.metal" and parts[-2] in CACHE_VERSIONS
             and parts[-1] in NAMES and not any(p in (".", "..") for p in relative.parts)
             and (len(parts) != 5 or parts[0] == "WindowServer"))
 

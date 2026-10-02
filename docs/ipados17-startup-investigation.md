@@ -1663,3 +1663,60 @@ a shell prompt. `sonoma-login-fixed-capture.log` records an actual IOSurface
 2388x1668 capture (CAPTURE_EXIT0). Old interactive-login windows are not
 silently reauthenticated. Full reboot/desktop restart regression remains
 pending; this validates the missing-dependency cause and new-window login.
+
+## Sonoma CoreImage/compiler and menu follow-up (2026-10-03)
+
+Runtime-confirmed via `coreimage-menu-20261003/coreimage14-current-probe.log`:
+stock CoreImage reported `This library format is not supported on this platform
+(or was built with an old version of the tools)` and produced no visible pixels.
+The captured kind-14 request contained ten modules with the exact target
+`air64-apple-macosx14.0.0`. Its reply contained an MTLB at offset 104 whose
+target byte was 0x82 and whose triple was `air64-apple-ios17.0.0`.
+The captured kind-5 CoreUI request contained two macOS 14 modules; its macOS
+output was rejected by the native pipeline with `Target OS is incompatible`.
+
+RE-confirmed via the installed iPadOS 17 images and the read-only
+`macws_gpu_compiler_target_probe` (`gpu-compiler-target17.log`): GPUCompiler
+UUID `9e166aee7f46396e81b7b3bba347b9cb`, defaultTargetTriple offset 0x2e568,
+entry words `d503237f d10303ff a9085ff8 a90957f6`; ComposeFilters UUID
+`0a1057e8a6b3316996295943cc696d4a`, compose entry offset 0xa8dc, words
+`d503237f d10443ff a90b6ffc a90c67fa`; LLVM UUID
+`798e729a2a1c3fcc976ce4b2a86723cb`, GetTarget offset 0xb8a2a8 and SetTarget
+0xb8a2c4. Production guards require the supported paired images and entries,
+and matching targets across every request-owned module. They use Apple's
+Catalyst target constructor and LLVM target setter, retaining compiler and
+pipeline validation. The original Ventura compiler profile remains supported.
+
+The old cache migration visited only 31001. The actual Sonoma cache also
+contained 32023/libraries.list and libraries.data. The v4 migration archived
+24 derived files after stopping the GUI and retiring seven leftover test apps;
+a first attempt correctly deferred while those apps were alive. All files
+remain in the rootfs retirement journal. Unknown cache versions remain untouched.
+
+Runtime-confirmed via `coreimage14-normal-v4.log`:
+`CI-PROBE pixels=256 visible=256 changed-bytes=748 varied-bytes=668 dags=0 hash=f0d3b28ab6d70146`.
+Runtime-confirmed via `coreimage14-coreui-v4.log`:
+`CI-PROBE pixels=256 visible=256 changed-bytes=226 varied-bytes=672 dags=0 hash=2842d1a2e7ace5d7`.
+Both are genuine native GPU renders. The DAG observer reported zero callbacks,
+so these results are not claimed as observer-confirmed fresh-DAG executions.
+Calendar subsequently displayed both its welcome screen and month view.
+Finder's toolbar still showed a magenta square in the final composite;
+therefore the compiler fix does not establish that all reported pink UI is fixed.
+
+Runtime-confirmed via Finder.host.log: the metrics publisher queried
+resizeIncrements on NSPopoverWindow, whose frame raised
+`-[NSPopoverFrame resizeIncrements]: unrecognized selector`. Query that
+optional resize metric only for resizable windows. The menu input change
+separates Quartz screen inversion from the producer's mapping frame and
+invalidates the persistent synthetic position before native CGPost delivery.
+Actual screenshots `macws-pointer-selection.png` and `macws-kind-checked.png`
+show the Folders grouping and checked Kind item after selection. This validates
+one Finder grouping operation, not every submenu or fullscreen route.
+
+Contacts' external LocalSource plugin was present with the actual arm64e ABI0
+slice, but dlopen_preflight rejected it before its current CDHash was registered.
+The original plugin passed preflight after trustcache registration without
+re-signing. The dependency-based admission script now includes the external
+Address Book Plug-Ins only for actual AddressBook consumers, confines realpaths
+to the rootfs, and preserves original signatures. Contacts' old NSNull crash
+ceased; CoreData/ViewBridge errors remain and no complete Contacts UI is claimed.

@@ -1,6 +1,6 @@
 # iPadOS 17.0 + macOS 14.0 适配说明
 
-更新日期：2026-10-02。分支：`codex/ipados17-sonoma14`。
+更新日期：2026-10-03。分支：`codex/ipados17-sonoma14`。
 
 **基础桌面已经跑通，上游提到的功能尚未全部验证。** 本分支记录现有设备上的适配和回归结果，不代表任意 iOS 17 设备都能直接安装成功。
 
@@ -121,3 +121,14 @@ bash /var/jb/usr/macOS/bin/macos_gui.sh stop
 - **iCloud**：查阅当前 macPad 和 MacWSBootingGuide README，未找到明确支持声明。没有读取设备账号、登录信息或尝试同步；现有 iPadOS cloud daemon 的存在不能作为 macOS iCloud 验证。
 
 上述记录来自实际运行系统，调查记录列出了本地证据位置。当前状态仍是适配中的基础桌面，不是完整可用的 macOS 系统。
+
+## 2026-10-03 菜单和原生滤镜修复
+
+- Finder 分组菜单：修正原生事件投递时遗留的鼠标位置缓存，以及菜单跟踪中全屏坐标与窗口映射坐标的混用。实际选择“Kind”后，文件列表出现“Folders”分组，再次打开菜单时“Kind”带勾。其他二级菜单仍需逐项验证。
+- 弹出窗口：固定尺寸窗口不再读取仅用于诊断的 `resizeIncrements`，避免 `NSPopoverFrame` 不支持该方法时被诊断代码弄崩溃。
+- Sonoma CoreImage/CoreUI：识别真实请求中的 `air64-apple-macosx14.0.0`。仅在 iPadOS 17 编译器 UUID、入口指令和所有模块目标一致时，使用原生 Catalyst 编译目标。未修改输出库头或跳过 Metal 验证。
+- 派生缓存：补充 Sonoma 的 `32023` 缓存槽；只归档 `libraries.list` 和 `libraries.data`。本机共归档 24 个文件到 rootfs 内 `/Library/Caches/MacWS/metal-library-target/retired/macws-macabi-sonoma-ios17-v4/`，未删除用户数据。
+- 实际 GPU 验证：普通 CoreImage 滤镜与 CoreUI 的 `CUIHueSaturationFilterLocal` 均生成 256/256 个可见像素，输出具有变化。桌面恢复后日历的欢迎界面和月视图均实际可见；事件保存、账户同步尚未验证。
+- AddressBook 动态插件：依真实框架依赖补充插件 trustcache，保留原签名；Contacts 原来的 LocalSource 架构拒绝和随后的 NSNull 崩溃已消失，但尚未验证完整联系人窗口。
+
+相关测试 76 项通过；libmachook 和编译器 tweak 的 arm64/arm64e 构建通过并已部署。**粉色方块仍在 Finder 工具栏复现，设置右侧仍空白，浏览器及 App Store、Photos、FaceTime、TV 的完整使用仍未通过。** 滤镜探针成功不能作为这些功能全部完成的证据。

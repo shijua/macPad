@@ -70,6 +70,23 @@ class MetalDAGRequestTests(unittest.TestCase):
         self.assertEqual(self.input_target(request([module(MACOS_TARGET)],
                                                  version=True, triple=MACOS_TARGET)), 1)
 
+    def test_sonoma_coreimage_request_target(self):
+        # Runtime raw-75742-001-e on 23A344: ten macOS 14 AIR modules.
+        target = b"air64-apple-macosx14.0.0"
+        value = request([module(target)] * 10)
+        self.assertEqual(self.input_target(value), 2)
+        self.assertFalse(self.accepts(value))
+        self.assertEqual(self.input_target(request([module(target)],
+            version=True, triple=target)), 2)
+        for length in range(len(value)):
+            self.assertEqual(self.input_target(value[:length]), 0, length)
+        self.assertEqual(self.input_target(request(
+            [module(target), module(MACOS_TARGET)])), 0)
+        self.assertEqual(self.input_target(request(
+            [module(target)], triple=MACOS_TARGET)), 0)
+        for suffix in (b".1", b"oops", b"-simulator"):
+            self.assertEqual(self.input_target(request([module(target + suffix)])), 0)
+
     def test_every_macos_truncation_rejected(self):
         value = request([module(MACOS_TARGET)] * 2, triple=MACOS_TARGET)
         for length in range(len(value)):

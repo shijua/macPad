@@ -2,6 +2,7 @@
 @import Foundation;
 @import Darwin;
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <syslog.h>
 #include <mach-o/dyld.h>
@@ -16,13 +17,14 @@
 #include "../include/macws_metal_image_filter_request.h"
 #include "../include/macws_code_pointer.h"
 
-// The rootless iOS 16 Theos SDK used by this project omits xpc/xpc.h.  This
-// is the exact public C ABI needed by the UUID-locked reply observer.
-extern void *xpc_data_create(const void *bytes, size_t length);
-extern void xpc_dictionary_set_uint64(void *dictionary, const char *key,
-                                       uint64_t value);
-extern void xpc_dictionary_set_string(void *dictionary, const char *key,
-                                       const char *value);
+// The compiler callbacks use raw C pointers. Symbol aliases keep that ABI
+// on old SDKs without xpc headers and modern SDKs with ARC-managed xpc_object_t.
+extern void *MacWSRawXPCDataCreate(const void *bytes, size_t length)
+    __asm("_xpc_data_create");
+extern void MacWSRawXPCSetUInt64(void *dictionary, const char *key, uint64_t value)
+    __asm("_xpc_dictionary_set_uint64");
+extern void MacWSRawXPCSetString(void *dictionary, const char *key, const char *value)
+    __asm("_xpc_dictionary_set_string");
 
 // Diagnostics are explicitly opt-in for the current boot.  They must never
 // survive as configuration under a persistent mobile or rootless directory.
@@ -449,30 +451,43 @@ static bool InstallCatalystDAGTargetContext(void) {
     void *function = image ? dlsym(image,
         "_ZN7metalfe11GPUCompiler22getDefaultTargetTripleEN4llvm8OptionalINS1_5MachO12PlatformTypeEEE") : NULL;
     Dl_info info = {0};
-    const uint8_t uuid[16] = {0x41,0xd2,0xf0,0x61,0x8d,0xa8,0x3c,0xfa,0x8c,0x4a,0xc3,0xe9,0xd7,0x00,0x96,0x04};
+    // runtime-confirmed via gpu-compiler-target17.log, exported function
+    // +0x2e568 on 21A329. The indirect result remains in x8; preserve the
+    // original constructor and lock both image identity and entry bytes.
+    static const struct {
+        uint8_t uuid[16];
+        uint32_t entry[4];
+    } supported[] = {
+        {{0x41,0xd2,0xf0,0x61,0x8d,0xa8,0x3c,0xfa,0x8c,0x4a,0xc3,0xe9,0xd7,0x00,0x96,0x04},
+         {0xd503237f,0xd10283ff,0xa9065ff8,0xa90757f6}},
+        {{0x9e,0x16,0x6a,0xee,0x7f,0x46,0x39,0x6e,0x81,0xb7,0xb3,0xbb,0xa3,0x47,0xb9,0xcb},
+         {0xd503237f,0xd10303ff,0xa9085ff8,0xa90957f6}},
+    };
     if (!function || !dladdr((void *)StripPAC(function), &info)) return false;
     const struct mach_header_64 *header = info.dli_fbase;
     if (!header || header->magic != MH_MAGIC_64 || header->sizeofcmds > 1048576)
         return false;
-    bool matched = false;
+    const uint32_t *expected = NULL;
     const uint8_t *cursor = (const void *)(header + 1), *end = cursor + header->sizeofcmds;
     for (uint32_t i = 0; i < header->ncmds && cursor + sizeof(struct load_command) <= end; i++) {
         const struct load_command *cmd = (const void *)cursor;
         if (cmd->cmdsize < sizeof(*cmd) || cmd->cmdsize > (size_t)(end - cursor)) return false;
-        if (cmd->cmd == LC_UUID && cmd->cmdsize >= sizeof(struct uuid_command))
-            matched = !memcmp(((const struct uuid_command *)cmd)->uuid, uuid, 16);
+        if (cmd->cmd == LC_UUID && cmd->cmdsize >= sizeof(struct uuid_command)) {
+            for (size_t j = 0; j < sizeof(supported)/sizeof(supported[0]); j++)
+                if (!memcmp(((const struct uuid_command *)cmd)->uuid, supported[j].uuid, 16))
+                    expected = supported[j].entry;
+        }
         cursor += cmd->cmdsize;
     }
-    const uint32_t expected[] = {0xd503237f, 0xd10283ff, 0xa9065ff8, 0xa90757f6};
     void *entry = (void *)StripPAC(function);
-    if (!matched || memcmp(entry, expected, sizeof(expected))) {
+    if (!expected || memcmp(entry, expected, 4 * sizeof(*expected))) {
         MTLPatchLog("Catalyst DAG target context: unsupported compiler ABI; original retained");
         return false;
     }
     MSHookFunction(function, (void *)MacWSDefaultTripleForRequest,
                    (void **)&gOriginalDefaultTriple);
     kern_return_t protection = vm_protect(mach_task_self(), (vm_address_t)entry,
-        sizeof(expected), false, VM_PROT_READ | VM_PROT_EXECUTE);
+        4 * sizeof(*expected), false, VM_PROT_READ | VM_PROT_EXECUTE);
     gCatalystDAGTargetReady = gOriginalDefaultTriple && protection == KERN_SUCCESS;
     MTLPatchLog("Catalyst DAG target context installed=%d restore-rx=%d",
                 gCatalystDAGTargetReady, protection);
@@ -498,6 +513,8 @@ static MacWSComposeImageFiltersFn gOriginalComposeImageFilters;
 static MacWSLLVMGetTargetFn gImageFilterGetTarget;
 static MacWSLLVMSetTargetFn gImageFilterSetTarget;
 static _Thread_local uint32_t gImageFilterRequestModuleCount;
+static _Thread_local MacWSMetalDAGInputTarget gImageFilterRequestTarget;
+static const char *gImageFilterOutputTarget = "air64-apple-ios19.0.0-macabi";
 static bool gImageFilterTargetAttempted;
 static bool gImageFilterTargetReady;
 
@@ -527,11 +544,13 @@ static void *MacWSComposeImageFilters(void *moduleVector, void *functions,
             if (modules[i] == modules[j]) { supported = false; break; }
         if (!supported) break;
         const char *target = gImageFilterGetTarget(modules[i]);
-        supported = target && !strcmp(target, "air64-apple-macosx13.4.0");
+        const char *expected = gImageFilterRequestTarget == MacWSMetalDAGInputMacOS140
+            ? "air64-apple-macosx14.0.0" : "air64-apple-macosx13.4.0";
+        supported = target && !strcmp(target, expected);
     }
     if (supported) {
         for (uint32_t i = 0; i < count; ++i)
-            gImageFilterSetTarget(modules[i], "air64-apple-ios19.0.0-macabi");
+            gImageFilterSetTarget(modules[i], gImageFilterOutputTarget);
     }
     if (count && MacWSCompilerDiagnosticsEnabled())
         MTLPatchLog("MacWS image-filter module-target count=%u adapted=%d",
@@ -582,12 +601,23 @@ static bool InstallImageFilterTargetContext(void) {
     static const uint32_t composeEntry[4] = {0xd503237f,0xd10443ff,0xa90b6ffc,0xa90c67fa};
     static const uint32_t getEntry[4] = {0xaa0003e8,0x91036000,0x39c3bd08,0x37f80048};
     static const uint32_t setEntry[4] = {0xd503237f,0xa9be4ff4,0xa9017bfd,0x910043fd};
-    if (!MacWSCompilerSymbolMatches(function, composeUUID, 0x9bb8, composeEntry) ||
-        !MacWSCompilerSymbolMatches(getTarget, llvmUUID, 0x844fb0, getEntry) ||
-        !MacWSCompilerSymbolMatches(setTarget, llvmUUID, 0x844fcc, setEntry)) {
+    // runtime-confirmed via gpu-compiler-target17.log: the exported compose
+    // entry retains its four arguments and the vector-reading prologue; LLVM
+    // getters/setters retain their exact entry bytes on 21A329.
+    static const uint8_t compose17UUID[16] = {0x0a,0x10,0x57,0xe8,0xa6,0xb3,0x31,0x69,0x96,0x29,0x59,0x43,0xcc,0x69,0x6d,0x4a};
+    static const uint8_t llvm17UUID[16] = {0x79,0x8e,0x72,0x9a,0x2a,0x1c,0x3f,0xcc,0x97,0x6c,0xe4,0xb2,0xa8,0x67,0x23,0xcb};
+    bool legacy = MacWSCompilerSymbolMatches(function, composeUUID, 0x9bb8, composeEntry) &&
+        MacWSCompilerSymbolMatches(getTarget, llvmUUID, 0x844fb0, getEntry) &&
+        MacWSCompilerSymbolMatches(setTarget, llvmUUID, 0x844fcc, setEntry);
+    bool ios17 = MacWSCompilerSymbolMatches(function, compose17UUID, 0xa8dc, composeEntry) &&
+        MacWSCompilerSymbolMatches(getTarget, llvm17UUID, 0xb8a2a8, getEntry) &&
+        MacWSCompilerSymbolMatches(setTarget, llvm17UUID, 0xb8a2c4, setEntry);
+    if (!legacy && !ios17) {
         MTLPatchLog("Image-filter target context: unsupported compiler ABI; original retained");
         return false;
     }
+    gImageFilterOutputTarget = ios17
+        ? "air64-apple-ios17.0.0-macabi" : "air64-apple-ios19.0.0-macabi";
     gImageFilterGetTarget = (MacWSLLVMGetTargetFn)getTarget;
     gImageFilterSetTarget = (MacWSLLVMSetTargetFn)setTarget;
     MSHookFunction(function, (void *)MacWSComposeImageFilters,
@@ -769,7 +799,7 @@ static void DumpRawCompilerRequest(uint32_t sequence, uintptr_t discriminator,
 // records the returned container verbatim, then calls the real XPC API.  No
 // result bytes or status are changed.
 static void *MacWSCompilerReplyDataCreate(const void *bytes, size_t length) {
-    if (!MacWSCompilerDiagnosticsEnabled()) return xpc_data_create(bytes, length);
+    if (!MacWSCompilerDiagnosticsEnabled()) return MacWSRawXPCDataCreate(bytes, length);
     static _Atomic uint32_t replySequence = 0;
     uint32_t sequence = atomic_fetch_add(&replySequence, 1) + 1;
     uint64_t hash = MacWSFNV1a64(bytes, length);
@@ -814,7 +844,7 @@ static void *MacWSCompilerReplyDataCreate(const void *bytes, size_t length) {
                         sequence, path, errno);
         }
     }
-    return xpc_data_create(bytes, length);
+    return MacWSRawXPCDataCreate(bytes, length);
 }
 
 // iOS 17's reply callback writes the error branch without calling
@@ -827,7 +857,7 @@ static void MacWSCompilerReplySetError(void *dictionary, const char *key,
                     gReplyRequestSequence,
                     (unsigned long)gReplyRequestDiscriminator,
                     (unsigned long long)value);
-    xpc_dictionary_set_uint64(dictionary, key, value);
+    MacWSRawXPCSetUInt64(dictionary, key, value);
 }
 
 static void MacWSCompilerReplySetErrorMessage(void *dictionary,
@@ -836,7 +866,7 @@ static void MacWSCompilerReplySetErrorMessage(void *dictionary,
     if (key && strcmp(key, "errorMessage") == 0)
         MTLPatchLog("compiler error message request=%u text=%s",
                     gReplyRequestSequence, value ? value : "(null)");
-    xpc_dictionary_set_string(dictionary, key, value);
+    MacWSRawXPCSetString(dictionary, key, value);
 }
 
 static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
@@ -1019,8 +1049,10 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
 
     MacWSMetalDAGInputTarget dagInputTarget = a2 == 14
         ? MacWSMetalDAGGetInputTarget(request, requestSize) : MacWSMetalDAGInputUnknown;
-    bool nativeImageFilter = a2 == 5 &&
-        MacWSMetalImageFilterGetInputTarget(request, requestSize) == MacWSMetalDAGInputMacOS134;
+    MacWSMetalDAGInputTarget imageFilterTarget = a2 == 5
+        ? MacWSMetalImageFilterGetInputTarget(request, requestSize) : MacWSMetalDAGInputUnknown;
+    bool nativeImageFilter = imageFilterTarget == MacWSMetalDAGInputMacOS134 ||
+        imageFilterTarget == MacWSMetalDAGInputMacOS140;
     if (adapted || dagInputTarget != MacWSMetalDAGInputUnknown || nativeImageFilter)
         pthread_rwlock_wrlock(&gMetalBuildRequestLock);
     else
@@ -1040,6 +1072,8 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
     gMacWSDAGInputTarget = dagInputTarget && InstallCatalystDAGTargetContext()
         ? dagInputTarget : MacWSMetalDAGInputUnknown;
     uint32_t previousImageFilterCount = gImageFilterRequestModuleCount;
+    MacWSMetalDAGInputTarget previousImageFilterTarget = gImageFilterRequestTarget;
+    gImageFilterRequestTarget = imageFilterTarget;
     gImageFilterRequestModuleCount = nativeImageFilter && InstallImageFilterTargetContext()
         ? MacWSMetalImageFilterReadLE32((const uint8_t *)request + 8) : 0;
     if (diagnostics && dagInputTarget)
@@ -1048,6 +1082,7 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
     uintptr_t result = OrigMTLCodeGenServiceBuildRequest(
         a0, a1, a2, request, requestSize, a5);
     gImageFilterRequestModuleCount = previousImageFilterCount;
+    gImageFilterRequestTarget = previousImageFilterTarget;
     gMacWSDAGInputTarget = previousDAGContext;
     atomic_store_explicit(&gMacWSMetalBuildRequestActive, false,
                           memory_order_release);
