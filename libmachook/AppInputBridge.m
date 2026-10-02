@@ -230,6 +230,7 @@ typedef struct {
     uint64_t sceneID;
     NSInteger windowNumber;
     CGRect screenFrame;
+    CGFloat quartzScreenMaxY;
     CGPoint windowMinusScreen;
     Class eventClass;
     CFTypeRef application;
@@ -628,6 +629,7 @@ static int MacWSFilteredFprintf(FILE *stream, const char *format, ...) {
 typedef struct {
     NSInteger windowNumber;
     CGRect screenFrame;
+    CGFloat quartzScreenMaxY;
     CGPoint windowMinusScreen;
     Class eventClass;
     CFTypeRef application;
@@ -2270,6 +2272,7 @@ static void MacWSArmDirectTrackingContextLocked(id application,
                                                 uint32_t contactID,
                                                 NSInteger windowNumber,
                                                 CGRect screenFrame,
+                                                CGRect globalScreenFrame,
                                                 CGPoint screenPoint,
                                                 CGPoint windowPoint) {
     MacWSClearDirectTrackingContextLocked();
@@ -2278,6 +2281,7 @@ static void MacWSArmDirectTrackingContextLocked(id application,
     MacWSAppInputDirectContext.sceneID = sceneID;
     MacWSAppInputDirectContext.windowNumber = windowNumber;
     MacWSAppInputDirectContext.screenFrame = screenFrame;
+    MacWSAppInputDirectContext.quartzScreenMaxY = CGRectGetMaxY(globalScreenFrame);
     MacWSAppInputDirectContext.windowMinusScreen = (CGPoint){
         windowPoint.x - screenPoint.x,
         windowPoint.y - screenPoint.y,
@@ -2360,6 +2364,7 @@ static void MacWSClearMenuContextLocked(void) {
 static void MacWSCacheMenuContextLocked(id application, Class eventClass,
                                         NSInteger windowNumber,
                                         CGRect screenFrame,
+                                        CGRect globalScreenFrame,
                                         CGPoint screenPoint,
                                         CGPoint windowPoint,
                                         BOOL menuSurface) {
@@ -2368,6 +2373,7 @@ static void MacWSCacheMenuContextLocked(id application, Class eventClass,
         screenFrame.size.height <= 0.0) return;
     MacWSAppInputMenuContext.windowNumber = windowNumber;
     MacWSAppInputMenuContext.screenFrame = screenFrame;
+    MacWSAppInputMenuContext.quartzScreenMaxY = CGRectGetMaxY(globalScreenFrame);
     MacWSAppInputMenuContext.windowMinusScreen = (CGPoint){
         windowPoint.x - screenPoint.x,
         windowPoint.y - screenPoint.y,
@@ -4925,6 +4931,11 @@ static BOOL MacWSPostLegacySystemPointerEvent(
         screenPoint.x,
         screenFrame.origin.y + screenFrame.size.height - screenPoint.y,
     };
+    // A native menu consumes events through nextEvent:, bypassing our
+    // sendEvent: location witness. A previous process-local position must not
+    // override WindowServer while its native pointer stream is authoritative.
+    BOOL previousPersistentLocationValid = MacWSAppInputPersistentMouseLocationValid;
+    MacWSAppInputPersistentMouseLocationValid = NO;
     int32_t firstResult = 0;
     int32_t secondResult = 0;
     BOOL latencyMarker = atomicTap &&
@@ -4984,6 +4995,8 @@ static BOOL MacWSPostLegacySystemPointerEvent(
             leftDown, rightDown, false);
     }
     BOOL posted = firstResult == 0 && secondResult == 0;
+    if (!posted)
+        MacWSAppInputPersistentMouseLocationValid = previousPersistentLocationValid;
     if (!posted && latencyMarker)
         MacWSRemoveSystemInputLatencyMarker(
             exactWindow != 0 ? exactWindow : (uint32_t)windowNumber);
@@ -6096,6 +6109,7 @@ static BOOL MacWSPrepareDirectTrackingPostLocked(
     }
     snapshot->windowNumber = MacWSAppInputDirectContext.windowNumber;
     snapshot->screenFrame = MacWSAppInputDirectContext.screenFrame;
+    snapshot->quartzScreenMaxY = MacWSAppInputDirectContext.quartzScreenMaxY;
     snapshot->windowMinusScreen =
         MacWSAppInputDirectContext.windowMinusScreen;
     snapshot->eventClass = MacWSAppInputDirectContext.eventClass;
@@ -6426,8 +6440,7 @@ static void MacWSPostDirectTrackingRecord(
                 MacWSLegacySystemMousePoster();
             CGPoint quartzPoint = {
                 screenPoint.x,
-                snapshot.screenFrame.origin.y +
-                    snapshot.screenFrame.size.height - screenPoint.y,
+                snapshot.quartzScreenMaxY - screenPoint.y,
             };
             BOOL leftDown = record.kind == MacWSInputKindTouchMove;
             int32_t result = postMouse
@@ -6471,8 +6484,7 @@ static void MacWSPostDirectTrackingRecord(
                 MacWSLegacySystemMousePoster();
             CGPoint quartzPoint = {
                 screenPoint.x,
-                snapshot.screenFrame.origin.y +
-                    snapshot.screenFrame.size.height - screenPoint.y,
+                snapshot.quartzScreenMaxY - screenPoint.y,
             };
             int32_t result = postMouse
                 ? postMouse(quartzPoint, true, 3, false, false, false)
@@ -9888,7 +9900,7 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         pthread_mutex_lock(&MacWSAppInputRouteLock);
         MacWSCacheMenuContextLocked(
             application, eventClass, windowNumber, inputMappingFrame,
-            screenPoint, windowPoint, NO);
+            screenFrame, screenPoint, windowPoint, NO);
         pthread_mutex_unlock(&MacWSAppInputRouteLock);
         MacWSAppInputRFBTrackingActive = YES;
         MacWSAppInputRFBTrackingButtons = secondary ? 2u : 1u;
@@ -9974,7 +9986,7 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         pthread_mutex_lock(&MacWSAppInputRouteLock);
         MacWSArmDirectTrackingContextLocked(application, eventClass,
             record.sceneID, record.contactID, windowNumber, inputMappingFrame,
-            screenPoint, windowPoint);
+            screenFrame, screenPoint, windowPoint);
         useBufferedFallback = MacWSHasPendingTrackingRecordLocked(
             record.sceneID, record.contactID);
         if (useBufferedFallback) {
@@ -10508,7 +10520,7 @@ static void MacWSReplyToTargetProbeOnMainThread(
                 (id)menuWindowClass);
         pthread_mutex_lock(&MacWSAppInputRouteLock);
         MacWSCacheMenuContextLocked(application, eventClass,
-            contextWindowNumber, screenFrame, screenPoint,
+            contextWindowNumber, screenFrame, screenFrame, screenPoint,
             contextWindowPoint, menuSurface);
         pthread_mutex_unlock(&MacWSAppInputRouteLock);
     }
@@ -11512,8 +11524,14 @@ static void MacWSPublishWindowMetrics(void) {
                                        MACWS_STREAM_MAX_DIMENSION};
             MacWSRequiredContentSizeLimits(window, &requiredMinimum,
                                            &requiredMaximum);
-            CGSize apiIncrements = MacWSOptionalDiagnosticWindowSize(
-                window, sel_registerName("resizeIncrements"));
+            // Sonoma's NSPopoverWindow inherits this getter from NSWindow,
+            // so respondsToSelector succeeds, but the getter forwards to an
+            // NSPopoverFrame without resizeIncrements (Finder runtime log).
+            // Fixed-size transient surfaces have no resize policy to query.
+            CGSize apiIncrements = resizable
+                ? MacWSOptionalDiagnosticWindowSize(
+                    window, sel_registerName("resizeIncrements"))
+                : (CGSize){NAN, NAN};
             [diagnosticEntries addObject:[NSString stringWithFormat:
                 @"id=%ld class=%s title=%@ style=%#lx frame=%.1fx%.1f min=%.1fx%.1f max=%.1fx%.1f resizable=%@ fixed=%@x%@ level=%ld visible=%@ transient=%@ api-min=%.1fx%.1f api-max=%.1fx%.1f content-min=%.1fx%.1f content-max=%.1fx%.1f required-min=%.1fx%.1f required-max=%.1fx%.1f increments=%.1fx%.1f",
                 (long)number, object_getClassName(window), title ?: @"",
