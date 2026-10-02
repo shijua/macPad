@@ -99,6 +99,25 @@ class SystemAppPreparation(unittest.TestCase):
                 self.assertEqual(result['images'], 2)
             self.assertEqual(restore.call_count, 2)
 
+    def test_external_plugins_follow_actual_framework_imports(self):
+        plugins = self.root / 'System/Library/Address Book Plug-Ins'
+        plugins.mkdir(parents=True)
+        address_book = '/System/Library/Frameworks/AddressBook.framework/Versions/A/AddressBook'
+        self.assertEqual(app.dynamic_plugin_roots({
+            'main': {'loads': [address_book]}}), [str(plugins.resolve())])
+        self.assertEqual(app.dynamic_plugin_roots({
+            'main': {'loads': ['/System/Library/Frameworks/AppKit.framework/AppKit']}}), [])
+        self.assertEqual(app.dynamic_plugin_roots({
+            'main': {'loads': ['/System/Library/Frameworks/AddressBook.framework-other/A']}}), [])
+
+    def test_external_plugin_alias_cannot_escape_rootfs(self):
+        plugins = self.root / 'System/Library/Address Book Plug-Ins'
+        plugins.parent.mkdir(parents=True)
+        plugins.symlink_to(self.root.parent)
+        with self.assertRaisesRegex(ValueError, 'escapes rootfs'):
+            app.dynamic_plugin_roots({'main': {'loads': [
+                '/System/Library/Frameworks/AddressBook.framework/AddressBook']}})
+
 
 if __name__ == '__main__':
     unittest.main()

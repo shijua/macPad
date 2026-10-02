@@ -31,6 +31,27 @@ APP_ROOTS = ('/System/Applications/', '/System/Library/CoreServices/',
 # preserves the app's original private rights/identity, as autosignd does.
 REQUIRED = ('com.apple.private.security.no-sandbox',
             'com.apple.private.security.no-container', 'get-task-allow')
+# Runtime-confirmed: Contacts selects LocalSource through NSBundle, so this
+# directory is absent from both its app-local PlugIns and Mach-O import graph.
+DYNAMIC_PLUGINS = {
+    '/System/Library/Frameworks/AddressBook.framework/':
+        '/System/Library/Address Book Plug-Ins',
+}
+
+
+def dynamic_plugin_roots(metadata):
+    loads = {name for image in metadata.values() for name in image['loads']}
+    root = os.path.realpath(ROOT)
+    paths = []
+    for framework, directory in DYNAMIC_PLUGINS.items():
+        if not any(name.startswith(framework) for name in loads):
+            continue
+        path = os.path.realpath(ROOT + directory)
+        if not path.startswith(root + '/'):
+            raise ValueError('dynamic plugin directory escapes rootfs')
+        if os.path.isdir(path):
+            paths.append(path)
+    return paths
 
 
 def resolve_target(path):
@@ -136,6 +157,16 @@ def prepare_locked(executable, plugins, state):
         # dependency graph, not an ever-growing hard-coded framework list.
         closure, metadata = dependencies.closure(executable, records, ROOT,
             trust.load_cache(dependency_manifest))
+        dynamic = dynamic_plugin_roots(metadata)
+        dynamic_records, dynamic_hashes, dynamic_counts = trust.scan(
+            dynamic, cached, resources=resources) if dynamic else ({}, set(),
+                dict.fromkeys(counts, 0))
+        if dynamic_records:
+            closure, metadata = dependencies.closure(executable,
+                {**records, **dynamic_records}, ROOT, metadata)
+        records.update(dynamic_records)
+        hashes.update(dynamic_hashes)
+        counts = {key: value + dynamic_counts[key] for key, value in counts.items()}
         extra, extra_hashes, extra_counts = trust.scan(
             [path for path in closure if path not in records], cached,
             resources=resources)
