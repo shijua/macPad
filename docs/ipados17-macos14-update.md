@@ -29,7 +29,7 @@
 | 全屏桌面、菜单栏、Dock、Finder 桌面 | 已验证 | Host 实际画面；Finder 文件操作未全面验证 |
 | 原生 AGX GPU 和最终画面呈现 | 已验证 | 实际 GPU 工作完成和可见像素；尚无“不损失性能”的基准证据 |
 | Launchpad 文件夹和背景模糊 | 已验证 | 修复打开文件夹的崩溃；连续关闭/打开 12 次，真实图标和模糊可见 |
-| Terminal、键盘和指针 | 部分验证 | `whoami` 实际返回 root；原生菜单新建第二个窗口；指针切换焦点。冷启动曾出现 `Login incorrect`，仍需修复和回归 |
+| Terminal、键盘和指针 | 部分验证 | `whoami` 实际返回 root；原生菜单新建第二个窗口；指针切换焦点。已修复 `--no-terminal` 桌面启动漏加载登录服务的问题，修复后新窗口实际进入 root shell；完整冷启动仍待回归 |
 | 系统设置及系统应用 | 已知故障 | 用户确认设置空白；日志记录 ViewBridge endpoint 无效及 shader 格式错误；原因尚未完全定位 |
 | 菜单栏交互 | 已知故障 | 用户报告无响应；当前 Terminal 的菜单快照请求超时。早先一次菜单操作成功不能证明持续可用 |
 | 每个应用独立 iOS 窗口、Stage Manager、自动调整尺寸 | 待验证 | 最终合成画面成功不等于独立窗口协议全部成立 |
@@ -95,6 +95,12 @@ bash /var/jb/usr/macOS/bin/macos_gui.sh stop
 ## 下一步
 
 优先定位 ViewBridge/设置服务、浏览器网络和菜单响应，再解决 Terminal 冷启动、图标生成及硬件控制问题。文件共享、输入法等仍需逐项回归。每项功能需有真实操作结果；进程存活、跳过断言或服务返回成功都不能单独作为完成证据。
+
+### Terminal 自动登录修复
+
+`login -pf root` 的当前失败原因已通过对照验证：桌面以 `--no-terminal` 启动时，代码也跳过了 OpenDirectory/AccountPolicy 两个登录服务。稍后从 Host 打开 Terminal，PAM 返回 `PAM_ACCOUNT=3 error in service module`。加载两个服务后，同一探针返回 `PAM_ACCOUNT=0 success`，真实 PTY 登录进入 shell。
+
+现在登录服务在桌面启动时必需加载，`--no-terminal` 只控制是否自动打开 Terminal 窗口。新窗口的真实键盘输入 `whoami` 返回 root，最终合成截图显示实际提示符及结果；没有设置密码或绕过 PAM。新增回归覆盖有/无 Terminal 和依赖启动失败，账户服务测试共 4 项通过。已退回 `login:` 提示的旧窗口需要关闭并新开窗口。
 
 ## 2026-10-02 补充功能检查
 

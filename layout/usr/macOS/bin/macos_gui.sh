@@ -5033,8 +5033,10 @@ start_macos() {
     wait_for_vnc_pointer_proxy || return 1
     started_ws_unchanged "OSXvnc pointer-proxy startup" || return 1
 
+    # Host starts the desktop with --no-terminal, then launches applications
+    # on demand. Their login children still require the directory graph.
+    start_macos_directory_services || return 1
     if [ "$WANT_TERMINAL" = 1 ]; then
-        start_macos_directory_services || return 1
         log "Starting Terminal (launchd job '$TERM_LABEL')..."
         rm -f "$LOGDIR/terminal.log"
         launchctl load "$TERM_PLIST" || return 1

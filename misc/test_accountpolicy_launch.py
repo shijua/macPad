@@ -22,8 +22,32 @@ class AccountPolicyLaunch(unittest.TestCase):
         self.assertTrue(all(name.startswith('com.macwsguide.od.') for name in services))
         gui = (ROOT / 'layout/usr/macOS/bin/macos_gui.sh').read_text()
         start = gui.index('if [ "$WANT_TERMINAL" = 1 ]; then', gui.index('start_macos() {'))
-        self.assertLess(gui.index('start_macos_directory_services || return 1', start),
-                        gui.index('launchctl load "$TERM_PLIST"', start))
+        self.assertLess(gui.index('start_macos_directory_services || return 1',
+                                  gui.index('start_macos() {')), start)
+
+    def test_optional_terminal_preserves_required_login_services(self):
+        gui = (ROOT / 'layout/usr/macOS/bin/macos_gui.sh').read_text()
+        start = gui.index('start_macos_directory_services || return 1',
+                          gui.index('start_macos() {'))
+        end = gui.index('    log "TIMING start-macos stage=optional-clients', start)
+        block = gui[start:end]
+        harness = '''
+start_macos_directory_services() { echo DIRECTORY; return "$DENY"; }
+log() { :; }
+rm() { :; }
+launchctl() { [ "$1" != load ] || echo TERMINAL; }
+proc_running() { return 0; }
+started_ws_unchanged() { return 0; }
+'''
+        for terminal in (0, 1):
+            for denied in (0, 1):
+                result = subprocess.run(['bash', '-c', harness +
+                    f'\nWANT_TERMINAL={terminal}\nDENY={denied}\n' +
+                    'start_clients() {\n' + block + '\n}\nstart_clients\n'],
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, denied)
+                self.assertEqual(result.stdout.splitlines(), ['DIRECTORY'] +
+                                 (['TERMINAL'] if terminal and not denied else []))
 
     def test_directory_start_stops_when_policy_load_fails(self):
         gui = (ROOT / 'layout/usr/macOS/bin/macos_gui.sh').read_text()

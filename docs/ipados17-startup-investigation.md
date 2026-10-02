@@ -1634,3 +1634,32 @@ No iCloud account operations were attempted. Current upstream READMEs make no
 explicit iCloud login/sync promise; iPadOS cloud services are not a macOS
 account or synchronization witness. Current feature coverage is in
 `ipados17-macos14-update.md`.
+
+## Terminal login service lifecycle fix (2026-10-02)
+
+Runtime-confirmed via `sonoma-login-current-pam.log`: both private directory
+jobs are absent, the root record resolves, PAM_START=0, but PAM_ACCOUNT=3
+(`error in service module`). Loading the existing AccountPolicy and
+OpenDirectory jobs gives PAM_ACCOUNT=0 in
+`sonoma-login-services-restored.log`. No account/password state is changed.
+
+Source-confirmed in macos_gui.sh: start_macos_directory_services was inside
+WANT_TERMINAL=1, while macwshostd starts the desktop with --no-terminal.
+Move the dependency outside that optional application branch. The failure
+test executes the actual shell block with both terminal choices and denied
+dependency startup, retaining fail-closed return behavior. Four accountpolicy
+tests and bash syntax checks pass.
+
+`sonoma-login-restored-pty.log` contains the real stock login -pf root result:
+root shell prompt, whoami output root, and macws-login-restored output. Its
+test-process teardown encountered a native signal permission error after
+successful output; the PTY was closed and the subsequent process inventory
+contains no remaining test login. This is not counted as a clean probe exit.
+
+The deployed script preserves GUI processes. A new Terminal launchd process
+PID59991 publishes window185, titled root — -sh. The production keyboard
+path sends whoami; `sonoma-login-fixed-frame.png` shows real output root and
+a shell prompt. `sonoma-login-fixed-capture.log` records an actual IOSurface
+2388x1668 capture (CAPTURE_EXIT0). Old interactive-login windows are not
+silently reauthenticated. Full reboot/desktop restart regression remains
+pending; this validates the missing-dependency cause and new-window login.
