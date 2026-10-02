@@ -15,6 +15,35 @@ PACKAGE_POSTINST = (ROOT / "layout/DEBIAN/postinst").read_text()
 
 
 class RestoreBootContract(unittest.TestCase):
+    def test_trusted_stock_service_still_replaces_apple_cms(self):
+        postinst = (ROOT / 'layout/usr/macOS/bin/postinst.sh').read_text()
+        start = postinst.index('sign_and_trustcache_with_entitlements() {')
+        end = postinst.index('\n}\n', start) + 2
+        harness = '''
+ldid() {
+    case "$1" in
+        -arch) echo CDHash=abc ;;
+        -h) [ "$CMS" = 0 ] || echo Authority=Apple; return 0 ;;
+        -e) echo '<key>com.apple.private.extensionkit.host.any-extension</key>' ;;
+        -S*) echo SIGN ;;
+        *) return 1 ;;
+    esac
+}
+is_trusted() { return 0; }
+trust_cdhash() { :; }
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            binary, entitlements = [Path(directory) / x for x in ('binary', 'entitlements')]
+            binary.touch()
+            entitlements.touch()
+            for cms in (0, 1):
+                result = subprocess.run(['bash', '-c', harness + postinst[start:end] +
+                    f'\nCMS={cms}\nsign_and_trustcache_with_entitlements "$1" "$2"\n',
+                    'service-signing', str(binary), str(entitlements)],
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ['SIGN', 'SIGN'] if cms else [])
+
     def test_pam_admission_replaces_cms_without_application_entitlements(self):
         postinst = (ROOT / "layout/usr/macOS/bin/postinst.sh").read_text()
         start = postinst.index("ensure_entitlement_free_signature_and_trustcache() {")

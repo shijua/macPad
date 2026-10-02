@@ -104,6 +104,12 @@ bash /var/jb/usr/macOS/bin/macos_gui.sh stop
 
 ## 2026-10-02 补充功能检查
 
+### 本轮实际修复
+
+- Dock 配置中指向不存在的 `/Applications/Keynote.app`、`Numbers.app`、`Pages.app` 三项已移除；原始 plist 保存在设备的 `sonoma-workspace-originals/dock-before-missing-iwork-cleanup.plist`。
+- `postinst.sh` 的签名判断已修正：受信任但仍带 Apple CMS 的二进制不会被误判为已完成 MacWS 签名；19 项启动合约测试通过。
+- 设置扩展服务本身已能启动，49 个设置扩展记录可验证。真实启动仍在创建容器时失败：运行日志记录 `com.apple.Appearance-Settings.extension ... (err=2) failed to set container`，UID 501 对照后仍无法发布扩展窗口。这个问题仍未完成，不能把空白右侧面板当作可用设置。
+
 - **设置**：`SystemSettings.host.log` 实际记录 `com.apple.view-bridge: Connection invalid`；ThemeWidgetControlViewService 的 listener 请求也无效。`settings-bridge ready=yes` 仅证明桥接能力发布，不能证明设置页面可用。
 - **图标**：`iconservicesagent.log` 记录 `This library format is not supported on this platform (or was built with an old version of the tools)`。THEORY：图标生成失败可能关联问号图标；需捕获具体应用的图标请求和失败回复才能确认。
 - **菜单**：当前 Terminal PID 的生产菜单快照协议请求得到 `socket.timeout: timed out`。该结果不证明所有应用的菜单都失败，也未定位到输入路由或主线程中的具体阻塞点。

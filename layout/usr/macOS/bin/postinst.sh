@@ -329,6 +329,7 @@ sign_and_trustcache_with_entitlements() {
         fi
     done
     if [ -n "$hashes" ] && [ "$dominated" -eq 1 ] &&
+       ! ldid -h "$path" 2>/dev/null | grep -q '^Authority=' &&
        ldid -e "$path" 2>/dev/null |
            grep -Fq "$required_marker"; then
         if [ -z "$identifier" ] ||
