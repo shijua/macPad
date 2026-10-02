@@ -31,10 +31,10 @@
 | Launchpad 文件夹和背景模糊 | 已验证 | 修复打开文件夹的崩溃；连续关闭/打开 12 次，真实图标和模糊可见 |
 | Terminal、键盘和指针 | 部分验证 | `whoami` 实际返回 root；原生菜单新建第二个窗口；指针切换焦点。已修复 `--no-terminal` 桌面启动漏加载登录服务的问题，修复后新窗口实际进入 root shell；完整冷启动仍待回归 |
 | 系统设置及系统应用 | 已知故障 | 用户确认设置空白；日志记录 ViewBridge endpoint 无效及 shader 格式错误；原因尚未完全定位 |
-| 菜单栏交互 | 已知故障 | 用户报告无响应；当前 Terminal 的菜单快照请求超时。早先一次菜单操作成功不能证明持续可用 |
+| 菜单栏交互 | 部分验证 | 2026-10-02：Finder 菜单快照返回 212 项；通过原生菜单动作新建 Finder 窗口成功。Finder 获得焦点后真实画面显示 Finder 菜单栏。其他应用及用户手指直接点菜单栏仍需回归 |
 | 每个应用独立 iOS 窗口、Stage Manager、自动调整尺寸 | 待验证 | 最终合成画面成功不等于独立窗口协议全部成立 |
 | 应用直接 drawable 加速 | 未确认 | Host 的 authority capability/controller identity 仍为 NO；不能以最终画面替代此项验证 |
-| 滚动、选择、拖动/调整窗口、右键、缩放/旋转 | 部分验证 | 用户确认窗口拖动正常；基础点击和焦点已有证据，其余手势及完整组合尚未逐项回归 |
+| 滚动、选择、拖动/调整窗口、右键、缩放/旋转 | 部分验证 | 用户确认窗口拖动正常；2026-10-02 对 Finder 空白区域发送原生右键后，实际画面出现 Finder 的“新建文件夹/显示简介/排序”上下文菜单。其余手势及完整组合尚未逐项回归 |
 | Mission Control、桌面切换、App Exposé、触屏触控板 | 待验证 | 未完成本环境功能回归 |
 | Magic Keyboard、虚拟键盘、快捷键工具栏、中文输入法 | 待完整验证 | 已验证基础硬件键盘输入；其他输入方式和中文组合输入尚未验证 |
 | 剪贴板、文件共享、拖放、导入导出、打开/保存面板 | 待验证 | 服务端点就绪不能证明用户操作全部成功 |
@@ -44,7 +44,7 @@
 | Apple Pencil、屏幕镜像 | 待验证 | 未完成本环境端到端操作 |
 | Safari/浏览器 | 已报告故障 | Safari 形成窗口的日志不能证明网页可用；HTTPS 命令行探针也失败，具体见下文 |
 | VS Code/Electron、Steam、Office、游戏 | 待验证 | 不沿用上游其他设备的运行结果 |
-| Apple ID / iCloud 登录、同步 | 未验证、无明确支持承诺 | 当前上游 README 没有明确声明 iCloud 登录/同步支持；未测试账号操作 |
+| Apple ID / iCloud 登录、同步 | 当前未接通 | Finder 显示 iCloud Drive 入口，但该 iPad 配置没有 macOS ubiquity 容器；本次只让 Finder 在容器确实缺失时按系统 API 返回 nil，容器存在则调用系统实现。未实现 Apple ID 登录或同步；上游 README 也没有明确的 iCloud 支持声明 |
 | VNC、锁屏/睡眠及恢复 | 待验证 | 当前桌面验证使用 Host 实际画面；VNC 不作为启动成功的必要条件 |
 | 长时间稳定运行、冷启动、全新安装 | 尚未完成 | 当前为已经配置的单台设备上的验证 |
 
@@ -57,6 +57,7 @@
 3. **Metal shader 闭包**：为 23A344 + 21A329 准备对应 shader companions 和清单；校验原始源码 SHA256 及完整转换结果。版本不匹配时拒绝自动套用。
 4. **应用和服务启动**：补充 LaunchServices payload、IconServices/CoreServices 桥接、OpenDirectory/accountpolicy 启动，以及 Dopamine fork 后的页面权限修复。
 5. **Launchpad 文件夹崩溃**：修复兼容纹理引入 IOSurface 后的所有权缺口。仅在精确 SkyLight UUID 和调用地址匹配时，向 `WS::Surface` 转移独立 retain；原有析构释放和缓存淘汰继续执行。
+6. **Finder 启动和菜单**：`sonoma-finder-admission.err` 记录 Finder 经 `NSFileManager ubiquityIdentityToken` 进入 CloudDocs/FileProvider 后崩溃；当 iCloud 容器确实缺失时向 Finder 返回 nil，容器存在时调用系统实现。2026-10-02 实测 Finder 窗口、212 项原生菜单、新窗口菜单动作和右键上下文菜单。激活 Finder 后真实画面显示 Finder 菜单栏；其他应用菜单及手指直接点击系统菜单栏仍需回归。
 
 第 5 项 RE-confirmed：实际 23A344 SkyLight UUID 为 `42FD2E33-2BB2-372F-A01F-B2B36C8277B9`，plain-texture 调用返回地址为 image + `0x5baac`；析构中的 CFRelease 位于 + `0x5b254`。runtime-confirmed：所有权跟踪显示旧路径的释放顺序耗尽了 pool 所持引用。具体证据及修复边界见调查记录的 “Sonoma Launchpad folder” 一节。
 

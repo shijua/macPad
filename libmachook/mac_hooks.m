@@ -100,6 +100,7 @@ enum {
 };
 
 static void macws_install_fsnode_root_volume_repair(void);
+static void macws_install_finder_ubiquity_absence_repair(void);
 extern void MacWSInstallOfficeMultiplyFilterCompatibility(void);
 static void macws_install_lsd_session_store_isolation(void);
 static const char *macws_private_bootstrap_service_name(const char *name);
@@ -5503,6 +5504,10 @@ void loadImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) 
         strstr(info.dli_fname, "/LaunchServices.framework/") != NULL) {
         macws_install_fsnode_root_volume_repair();
         macws_install_lsd_session_store_isolation();
+    }
+    if (info.dli_fname &&
+        strstr(info.dli_fname, "/Foundation.framework/") != NULL) {
+        macws_install_finder_ubiquity_absence_repair();
     }
     if (info.dli_fname &&
         strstr(info.dli_fname, "Electron Framework") != NULL) {
@@ -12911,6 +12916,47 @@ static int16_t LMGetBootDrive_new(void) {
                 (int)native, (int)repaired, (int)effective);
     }
     return effective;
+}
+
+// Finder's CloudDocs path requires a macOS ubiquity container. The iPad
+// rootfs has none, and runtime evidence shows Finder crashes in
+// NSFileManager ubiquityIdentityToken -> FileProvider during startup. Report
+// that actual absence only to Finder; preserve the native method if a real
+// container is present.
+static id (*macws_NSFileManager_ubiquity_original)(id, SEL) = NULL;
+static id macws_NSFileManager_ubiquityIdentityToken(id self, SEL selector) {
+    if (access("/var/mobile/Library/Mobile Documents", F_OK) != 0 &&
+        access("/var/mobile/Library/CloudStorage", F_OK) != 0) {
+        if (macws_runtime_diagnostics_enabled())
+            fprintf(stderr, "#### MACWS-FINDER iCloud container absent; token=nil\n");
+        return nil;
+    }
+    return macws_NSFileManager_ubiquity_original
+        ? macws_NSFileManager_ubiquity_original(self, selector) : nil;
+}
+
+static void macws_install_finder_ubiquity_absence_repair(void) {
+    const char *program = getprogname();
+    if (!program || strcmp(program, "Finder") != 0) return;
+    static _Atomic int installed = 0;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&installed, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) return;
+    Class cls = objc_getClass("NSFileManager");
+    SEL sel = sel_registerName("ubiquityIdentityToken");
+    Method method = cls ? class_getInstanceMethod(cls, sel) : NULL;
+    if (!method || strcmp(method_getTypeEncoding(method), "@16@0:8") != 0) {
+        atomic_store_explicit(&installed, 0, memory_order_release);
+        return;
+    }
+    IMP original = method_getImplementation(method);
+    if (!original || original == (IMP)macws_NSFileManager_ubiquityIdentityToken) {
+        atomic_store_explicit(&installed, 0, memory_order_release);
+        return;
+    }
+    macws_NSFileManager_ubiquity_original = (id (*)(id, SEL))original;
+    method_setImplementation(method,
+                              (IMP)macws_NSFileManager_ubiquityIdentityToken);
 }
 
 // A chroot changes pathname lookup's process root but does not turn that vnode
