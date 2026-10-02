@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import struct
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -195,6 +196,25 @@ class BootTrustTests(unittest.TestCase):
             self.assertIn(required, method)
         self.assertLess(method.index('"$@" || return 1'),
                         method.index('BASE_TRUST_READY=1'))
+
+    def test_session_thermal_override_keeps_sensor_validation(self):
+        script = (ROOT / 'layout/usr/macOS/bin/macos_gui.sh').read_text()
+        method = 'application_trust_thermally_safe() {' + script.split(
+            'application_trust_thermally_safe() {', 1)[1].split('\n}', 1)[0] + '\n}'
+        for override, valid, expected in ((0, True, 1), (1, True, 0),
+                                          (1, False, 1)):
+            setup = ('log() { :; }; thermal_snapshot() { '
+                     'THERMAL_STATE=serious; THERMAL_TEMP_CENTIC=3700; '
+                     f'return {0 if valid else 1}; }}; '
+                     f'MACWS_ALLOW_THERMAL_PRESSURE={override};\n')
+            result = subprocess.run(['bash', '-c', setup + method +
+                                     '\napplication_trust_thermally_safe'],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, expected)
+        closure = script.split('restore_cold_boot_trust() {', 1)[1].split('\n}', 1)[0]
+        self.assertIn('thermal_arguments=(--thermal-tool', closure)
+        self.assertIn('thermal_arguments=()', closure)
+        self.assertIn('"${thermal_arguments[@]}"', closure)
 
     def test_missing_hash_must_really_register_and_verify(self):
         class Add:

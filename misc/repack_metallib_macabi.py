@@ -48,6 +48,43 @@ MACABI_TARGET_OS = 0x86
 UNKNOWN_TARGET_OS = 0x00
 CURRENT_MTLB_FILE_VERSION = (2, 7)
 MTLB_HEADER_SIZE = 88
+
+
+def extract_air_container(data: bytes) -> bytes:
+    """Read the sole AIR v2.6 slice in Sonoma's universal Metal archive.
+
+    RE-confirmed on 23A344 QuartzCore: FAT_MAGIC, AIR cpu 0x01000017,
+    subtype 10, followed by two architecture-specific GPU executables.
+    The full input remains the runtime manifest's source identity.
+    """
+    if data[:4] == b"MTLB":
+        return data
+    if len(data) < 8 or data[:4] != b"\xca\xfe\xba\xbe":
+        raise ValueError("input is not an MTLB or supported universal archive")
+    count = struct.unpack_from(">I", data, 4)[0]
+    table_end = 8 + count * 20
+    if not count or table_end > len(data):
+        raise ValueError("invalid universal architecture table")
+    regions = []
+    air = []
+    for index in range(count):
+        cpu, subtype, offset, size, alignment = struct.unpack_from(
+            ">5I", data, 8 + index * 20)
+        end = offset + size
+        if (not size or offset < table_end or end > len(data) or
+                alignment > 31 or offset % (1 << alignment)):
+            raise ValueError("invalid universal slice bounds/alignment")
+        if any(offset < previous_end and start < end
+               for start, previous_end in regions):
+            raise ValueError("overlapping universal slices")
+        regions.append((offset, end))
+        if cpu == 0x01000017:
+            if subtype != 10:
+                raise ValueError("unsupported AIR architecture subtype")
+            air.append(data[offset:end])
+    if len(air) != 1 or air[0][:4] != b"MTLB":
+        raise ValueError("universal archive must contain exactly one AIR MTLB")
+    return air[0]
 OFFSET_SECTION_TAGS = {"HDYN", "VLST", "ILST", "HSRD", "HSRC", "RLST"}
 ABI_REPORT_VERSION = 1
 FUNCTION_TYPES = {
@@ -800,7 +837,8 @@ def convert(args: argparse.Namespace) -> None:
         )
     input_path = pathlib.Path(args.input)
     output_path = pathlib.Path(args.output)
-    original = input_path.read_bytes()
+    source_artifact = input_path.read_bytes()
+    original = extract_air_container(source_artifact)
     if len(original) < MTLB_HEADER_SIZE or original[:4] != b"MTLB":
         raise ValueError("input is not an MTLB container")
     input_platform = u16(original, 4)
@@ -1070,7 +1108,7 @@ def convert(args: argparse.Namespace) -> None:
     output_path.write_bytes(rebuilt)
     if args.runtime_manifest:
         runtime_manifest = build_runtime_manifest(
-            source=original,
+            source=source_artifact,
             output=bytes(rebuilt),
             source_runtime_path=args.runtime_source_path,
             output_runtime_path=args.runtime_output_path,

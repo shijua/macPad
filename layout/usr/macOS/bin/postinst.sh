@@ -7,6 +7,8 @@ cd $(realpath $HOME/../..)/usr/macOS
 # /Users/mobile on iOS, where the sealed root is read-only, and aborts before
 # the generic /Applications trustcache restoration runs.
 ROOTFS=/var/mnt/rootfs
+/var/jb/usr/bin/python3 "${BASH_SOURCE[0]%/*}/macws_prepare_shared_cache.py" \
+    --root "$ROOTFS" --repair || exit 1
 
 # Cover the boot-scanned directory as well as generated GUI jobs. Exact
 # historical jobs are archived without changing an already-running process.
@@ -573,7 +575,10 @@ ensure_project_signature_and_trustcache() {
     local path="$1"
     [ -f "$path" ] || return 0
     if ! ldid -e "$path" 2>/dev/null |
-         grep -q '<key>com.apple.private.graphics-restart-no-kill</key>'; then
+         grep -q '<key>com.apple.private.graphics-restart-no-kill</key>' ||
+       ldid -h "$path" 2>/dev/null | grep -q '^Authority='; then
+        # Stock WindowServer already has the graphics marker. Its Apple CMS
+        # identity still needs replacement when hosted by outer iPadOS launchd.
         ldid -S"$ENT" -M "$path" || return 1
     fi
     add_all_trustcache "$path"
@@ -589,7 +594,9 @@ ensure_entitlement_free_signature_and_trustcache() {
     local path="$1" entitlements=""
     [ -f "$path" ] || return 0
     entitlements=$(ldid -e "$path" 2>/dev/null || true)
-    if [ -n "$entitlements" ]; then
+    if [ -n "$entitlements" ] ||
+       { [ "${2:-}" = replace-apple-cms ] &&
+         ldid -h "$path" 2>/dev/null | grep -q '^Authority=Apple'; }; then
         ldid -S "$path" || return 1
     fi
     add_all_trustcache "$path"
@@ -946,9 +953,15 @@ add_all_trustcache "/var/jb/usr/macOS/Frameworks/FileCoordination.framework/Vers
 # the dynamic trustcache.  Persistently sign those upstream executables and
 # restore their CDHashes on every postinst/re-jailbreak, exactly like the other
 # initial process images below.
-sign_and_trustcache "/var/mnt/rootfs/System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary"
+# Sonoma ViewBridge proxy runtime confirms the same stock-CMS exec denial.
+ensure_project_signature_and_trustcache \
+    "/var/mnt/rootfs/System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary" || exit 1
 sign_and_trustcache "/var/mnt/rootfs/System/Library/CoreServices/UIKitSystem.app/Contents/MacOS/UIKitSystem"
-sign_and_trustcache "/var/mnt/rootfs/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/XPCServices/com.apple.hiservices-xpcservice.xpc/Contents/MacOS/com.apple.hiservices-xpcservice"
+# Sonoma runtime: a trusted stock CMS image still fails the proxy's exec
+# with System Policy deny process-exec. Require the project signature before
+# trusting it; a preexisting trustcache entry does not establish admission.
+ensure_project_signature_and_trustcache \
+    "/var/mnt/rootfs/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/XPCServices/com.apple.hiservices-xpcservice.xpc/Contents/MacOS/com.apple.hiservices-xpcservice" || exit 1
 sign_and_trustcache "/var/mnt/rootfs/System/Library/Frameworks/AppKit.framework/Versions/C/XPCServices/com.apple.appkit.xpc.openAndSavePanelService.xpc/Contents/MacOS/com.apple.appkit.xpc.openAndSavePanelService"
 sign_and_trustcache "/var/mnt/rootfs/System/Library/Frameworks/QuickLookUI.framework/Versions/A/XPCServices/QuickLookUIService.xpc/Contents/MacOS/QuickLookUIService"
 sign_and_trustcache_with_entitlements \
@@ -974,12 +987,35 @@ sign_and_trustcache_merging_native_entitlements \
     "$GEOD_NATIVE_ENT" \
     '<key>com.apple.private.network.socket-delegate</key>' \
     'com.apple.geod' || exit 1
-# codesign -vvv -d dyld_shared_cache_arm64e 2>&1 | grep CDHash=
-jbctl trustcache add b5da39409492ac85e5a8e8ab618fe77e2d7a2980
-# codesign -vvv -d dyld_shared_cache_arm64e.01 2>&1 | grep CDHash=
-jbctl trustcache add bbb765988e2677b98d47a549d612fa0d4af25f69
+cache_hashes=$(/var/jb/usr/bin/python3 \
+    "${BASH_SOURCE[0]%/*}/macws_prepare_shared_cache.py" \
+    --root "$ROOTFS" --cdhashes) || exit 1
+while IFS= read -r cache_hash; do
+    [ -n "$cache_hash" ] || exit 1
+    jbctl trustcache add "$cache_hash" || exit 1
+done <<< "$cache_hashes"
 add_all_trustcache "/var/mnt/rootfs/bin/bash"
+# Native kernel collection on Sonoma records stock filecoordinationd rejected
+# for unsuitable CT policy. Trusting its original Apple CMS hash is insufficient.
+ensure_project_signature_and_trustcache \
+    "$ROOTFS/usr/sbin/filecoordinationd" || exit 1
+# Terminal's login child reaches PAM after fork; native Sonoma logs record
+# pam_nologin.so.2 rejected for unsuitable CT policy. Keep PAM checks intact
+# and replace only the login stack's macOS CMS identities, without entitlements.
+for pam_module in pam_krb5 pam_ntlm pam_mount pam_opendirectory pam_nologin pam_launchd pam_uwtmp pam_deny; do
+    ensure_entitlement_free_signature_and_trustcache \
+        "$ROOTFS/usr/lib/pam/$pam_module.so.2" replace-apple-cms || exit 1
+done
 add_all_trustcache "/var/mnt/rootfs/System/Library/CoreServices/launchservicesd"
+ensure_project_signature_and_trustcache "$ROOTFS/usr/libexec/opendirectoryd" || exit 1
+ensure_project_signature_and_trustcache \
+    "$ROOTFS/System/Library/PrivateFrameworks/AccountPolicy.framework/XPCServices/com.apple.AccountPolicyHelper.xpc/Contents/MacOS/com.apple.AccountPolicyHelper" || exit 1
+for od_module in PlistFile search configure; do
+    ensure_entitlement_free_signature_and_trustcache \
+        "$ROOTFS/System/Library/OpenDirectory/Modules/$od_module.bundle/Contents/MacOS/$od_module" replace-apple-cms || exit 1
+done
+ensure_project_signature_and_trustcache \
+    "/var/mnt/rootfs/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" || exit 1
 SYSTEMSTATUSD="/var/mnt/rootfs/System/Library/PrivateFrameworks/SystemStatusServer.framework/Support/systemstatusd"
 if [ -f "$SYSTEMSTATUSD" ] &&
    ! ldid -e "$SYSTEMSTATUSD" 2>/dev/null | grep -q '<key>com.apple.systemstatus.domains</key>'; then
@@ -1082,8 +1118,11 @@ chmod 0700 "$ROOTFS/Users/mobile/Library/Containers/com.gameloft.asphalt9mac" \
 # Registering the existing dyld and chroot CydiaSubstrate CodeDirectories made
 # the unchanged bash process complete normally.  Keep this upstream of the
 # Ventura codesign calls rather than weakening their result checks.
-add_all_trustcache /var/mnt/rootfs/usr/lib/dyld
-add_all_trustcache \
+# iPadOS17 rejects an entitled MH_DYLINKER at WindowServer launch with
+# "has entitlements but is not a main binary". Preserve its patched code,
+# remove any inherited executable profile, then register its actual hashes.
+ensure_entitlement_free_signature_and_trustcache /var/mnt/rootfs/usr/lib/dyld || exit 1
+ensure_entitlement_free_signature_and_trustcache \
 	/var/mnt/rootfs/System/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate
 
 # System Settings panes are real Ventura ExtensionKit executables launched
@@ -1230,6 +1269,13 @@ done
 ensure_uncontainered_project_signature_and_trustcache \
     '/var/mnt/rootfs/usr/libexec/pkd' \
     '<key>com.apple.runningboard.launch_extensions</key>' || exit 1
+# Sonoma keeps this dependency outside the shared cache. Runtime control
+# admitted its original universal image after registering its actual CDHashes;
+# thinning or rewriting instructions was unnecessary.
+ensure_entitlement_free_signature_and_trustcache \
+    '/var/mnt/rootfs/System/Volumes/Preboot/Cryptexes/OS/System/Library/PrivateFrameworks/PlugInKitDaemon.framework/Versions/A/PlugInKitDaemon' || exit 1
+ensure_project_signature_and_trustcache \
+    '/var/mnt/rootfs/usr/bin/pluginkit' || exit 1
 # Ventura pkd's -[PKDPlugIn diagnose] accepts an extension without a
 # containing application only when rootless_check_trusted(bundleURL) reports
 # that its bundle is SIP-protected.  RE-confirmed in Ventura 13.4 pkd UUID
@@ -1324,7 +1370,7 @@ if [ -f "$OBJC_TRAMPOLINES" ] && [ -f "$OBJC_TRAMPOLINE_PATCHER" ]; then
     fi
 fi
 add_all_trustcache /var/mnt/rootfs/usr/lib/libobjc-trampolines.dylib
-add_all_trustcache /var/mnt/rootfs/usr/lib/dyld
+ensure_entitlement_free_signature_and_trustcache /var/mnt/rootfs/usr/lib/dyld || exit 1
 add_all_trustcache /var/mnt/rootfs/bin/ps
 add_all_trustcache /var/mnt/rootfs/bin/mv
 add_all_trustcache /var/mnt/rootfs/bin/cp
@@ -1347,7 +1393,7 @@ add_all_trustcache /var/mnt/rootfs/System/Library/PrivateFrameworks/GPUCompiler.
 # Runtime-confirmed on the 2026-09-14 cold boot: a uid/gid 501 Terminal main
 # image was rejected by the root-owned first-party application admission
 # invariant before spawn. Repair only the canonical regular stock executable;
-# its content and existing CodeDirectory remain unchanged.
+# Repair ownership before the project-signature admission below.
 TERMINAL_MAIN=/var/mnt/rootfs/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
 if [ -e "$TERMINAL_MAIN" ]; then
     [ -f "$TERMINAL_MAIN" ] && [ ! -L "$TERMINAL_MAIN" ] || {
@@ -1356,7 +1402,9 @@ if [ -e "$TERMINAL_MAIN" ]; then
     }
     chown root:wheel "$TERMINAL_MAIN" || exit 1
 fi
-add_all_trustcache /var/mnt/rootfs/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+# A stock Sonoma CMS signature is rejected with CT policy 0x8 on 21A329.
+# Trust registration alone cannot admit that executable.
+ensure_project_signature_and_trustcache "$TERMINAL_MAIN" || exit 1
 sign_and_trustcache '/var/mnt/rootfs/System/Applications/System Settings.app/Contents/MacOS/System Settings'
 sign_and_trustcache_with_identifier_requirement \
     '/var/mnt/rootfs/System/Applications/Maps.app/Contents/MacOS/Maps' \
@@ -1445,6 +1493,13 @@ qc_sha256() {
 	sha256sum "$1" 2>/dev/null | awk '{print $1}'
 }
 
+shader_macos_version=$(/var/jb/usr/bin/python3 -c \
+    'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProductVersion"])' \
+    "$ROOTFS/System/Library/CoreServices/SystemVersion.plist") || exit 1
+if [ "$shader_macos_version" = "14.0" ]; then
+    /var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/ensure_sonoma_shaders.py \
+        --root "$ROOTFS" || exit 1
+else
 bash /var/jb/usr/macOS/bin/ensure_quartzcore_compat.sh || exit 1
 
 # SkyLight has an independent desktop AIR target mismatch. Runtime failures
@@ -1515,6 +1570,7 @@ chmod 0644 "$MPSIMAGE_MANIFEST_TMP" || exit 1
 mv -f "$MPSIMAGE_COMPAT_TMP" "$MPSIMAGE_COMPAT_TARGET" || exit 1
 mv -f "$MPSIMAGE_MANIFEST_TMP" "$MPSIMAGE_MANIFEST_TARGET" || exit 1
 echo '[INFO] installed complete MPSImage metal2metal library'
+fi
 
 # Chromium 148 / Electron 42 ships ANGLE's default Metal library for macOS.
 # Its container loads in the chroot, but iOS MTLCompilerService rejects

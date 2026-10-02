@@ -19,6 +19,10 @@
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
+		<!-- Keep the stock storage daemon's fork children outside GUI/Metal
+		     code-page mutations. Its bootstrap interposes remain active. -->
+		<key>MACWS_UTILITY_PROCESS</key>
+		<string>1</string>
 		<key>__CF_USER_TEXT_ENCODING</key>
 		<string>0x0:0:0</string>
 		<key>__CFPREFERENCES_AVOID_DAEMON</key>

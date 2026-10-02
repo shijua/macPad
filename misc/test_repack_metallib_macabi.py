@@ -15,6 +15,52 @@ SPEC.loader.exec_module(REPACK)
 
 
 class AirAbiAnalysisTests(unittest.TestCase):
+    def test_sonoma_ios17_profile_matches_air26_specialization_target(self):
+        profile = REPACK.get_profile("sonoma14-ios17-macabi")
+        self.assertEqual(profile.source_family, "macOS 14.0 Apple AIR")
+        self.assertEqual(profile.target_triple, "air64-apple-ios17.0.0-macabi")
+        self.assertEqual((profile.target_major, profile.target_minor), (17, 0))
+        self.assertTrue(REPACK.target_triple_matches_container(
+            profile.target_triple, profile.container_target))
+
+    def test_sonoma_profile_has_independent_source_family(self):
+        profile = REPACK.get_profile("sonoma14-ios165-macabi")
+        self.assertEqual(profile.source_family, "macOS 14.0 Apple AIR")
+        self.assertEqual(profile.target_triple, "air64-apple-ios16.5.0-macabi")
+
+    def test_universal_air_slice_and_invalid_bounds(self):
+        air = b"MTLB" + bytes(84)
+        header = struct.pack(">II5I", 0xcafebabe, 1,
+                             0x1000017, 10, 32, len(air), 3)
+        archive = header + bytes(4) + air
+        self.assertEqual(REPACK.extract_air_container(archive), air)
+        self.assertEqual(REPACK.extract_air_container(air), air)
+        for offset, value in ((4, 2), (12, 11), (16, 24), (20, 999), (24, 32)):
+            broken = bytearray(archive)
+            struct.pack_into(">I", broken, offset, value)
+            with self.assertRaises(ValueError):
+                REPACK.extract_air_container(broken)
+
+    def test_universal_duplicate_air_and_overlap_are_rejected(self):
+        air = b"MTLB" + bytes(84)
+        for second_offset in (48, 136):
+            header = struct.pack(">II", 0xcafebabe, 2)
+            header += struct.pack(">5I", 0x1000017, 10, 48, len(air), 3)
+            header += struct.pack(">5I", 0x1000017, 10, second_offset, len(air), 3)
+            with self.assertRaises(ValueError):
+                REPACK.extract_air_container(header + air + air)
+
+    def test_ipados17_quartzcore_profile_matches_runtime_minor(self):
+        profile = REPACK.get_profile("ventura13-ios165-macabi")
+        self.assertEqual(
+            profile.target_triple, "air64-apple-ios16.5.0-macabi"
+        )
+        self.assertEqual(profile.container_target, "macabi")
+        self.assertEqual((profile.target_major, profile.target_minor), (16, 5))
+        self.assertTrue(REPACK.target_triple_matches_container(
+            profile.target_triple, profile.container_target
+        ))
+
     def test_analysis_reports_contract_vocabulary_without_function_names(self):
         text = """\
 target datalayout = "e-p:64:64-i64:64-n32-S64"

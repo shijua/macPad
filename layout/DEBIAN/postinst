@@ -272,6 +272,8 @@ trust_installed_macho "$LOCATIOND_PROXY"
 trust_installed_macho "$SETTINGS_EXTENSION_PROXY"
 trust_installed_macho "$LOCATION_BRIDGE"
 trust_installed_macho /var/jb/usr/macOS/bin/launchdchrootexec
+/var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_prepare_shared_cache.py \
+    --root "$ROOTFS" --repair || exit 1
 # Ventura 13.4's split arm64e shared cache has two fixed CodeDirectories.
 # Runtime-confirmed on a cold 2026-09-09 boot: after the executable loader
 # closure below was admitted, dyld rejected the codesign probe with
@@ -293,11 +295,49 @@ done
 # the same invariant for later workspace starts.
 trust_installed_macho "$ROOTFS/usr/lib/dyld"
 trust_installed_macho "$ROOTFS/usr/lib/libobjc-trampolines.dylib"
+# On a fresh rootfs ElleKit is available only outside the chroot. The
+# injected libmachook needs a macOS-platform copy before its first process.
+substrate_source=/var/jb/usr/lib/libellekit.dylib
+substrate_target="$ROOTFS/System/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
+if [ ! -f "$substrate_target" ]; then
+    [ -f "$substrate_source" ] || {
+        echo 'ERROR: ElleKit runtime is unavailable.' >&2
+        exit 1
+    }
+    mkdir -p "${substrate_target%/*}" || exit 1
+    cp -p "$substrate_source" "$substrate_target" || exit 1
+    /var/jb/usr/bin/python3 "$MACHO_PATCHER" "$substrate_target" || exit 1
+    /var/jb/usr/bin/ldid -S"$ENTITLEMENTS" -M "$substrate_target" || exit 1
+fi
 trust_installed_macho \
     "$ROOTFS/System/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
 trust_installed_macho \
     /var/jb/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate
+# Apple-signed codesign is itself rejected by iOS AMFI in this chroot. Keep
+# the resulting ad-hoc signature stable across repeated dpkg configurations.
+if ! /var/jb/usr/bin/ldid -e "$ROOTFS/usr/bin/codesign" 2>/dev/null |
+        grep -Fq '<key>com.apple.private.graphics-restart-no-kill</key>'; then
+    /var/jb/usr/bin/ldid -S"$ENTITLEMENTS" -M \
+        "$ROOTFS/usr/bin/codesign" || exit 1
+fi
 trust_installed_macho "$ROOTFS/usr/bin/codesign"
+# The stock Ventura bash lacks the entitlements required for the injected
+# chroot shell on iPadOS 17. Re-sign it once before publishing run_bash.sh;
+# registering its original Apple CDHash alone still left it SIGKILL'd.
+bash_target="$ROOTFS/bin/bash"
+if ! /var/jb/usr/bin/ldid -e "$bash_target" 2>/dev/null |
+        grep -Fq '<key>com.apple.private.graphics-restart-no-kill</key>'; then
+    /var/jb/usr/bin/ldid -S"$ENTITLEMENTS" -M "$bash_target" || exit 1
+fi
+trust_installed_macho "$bash_target"
+# Ventura defaults keeps its native trust-defaults-kvstore entitlement. Merge
+# the project profile so the first GUI preferences probe is admitted on iOS.
+defaults_target="$ROOTFS/usr/bin/defaults"
+if ! /var/jb/usr/bin/ldid -e "$defaults_target" 2>/dev/null |
+        grep -Fq '<key>com.apple.private.graphics-restart-no-kill</key>'; then
+    /var/jb/usr/bin/ldid -S"$ENTITLEMENTS" -M "$defaults_target" || exit 1
+fi
+trust_installed_macho "$defaults_target"
 # A fresh package install publishes new exec hooks before App-driven repair.
 # Start the matching signing daemon through the same bounded exact-name
 # supervisor so no old instance remains blocked on an unlinked socket inode.
@@ -562,7 +602,7 @@ install_chroot_runtime() {
     destination="$2"
     [ -f "$source" ] || return 0
     destination_dir=${destination%/*}
-    [ -d "$destination_dir" ] || return 0
+    mkdir -p "$destination_dir" || return 1
     temporary="${destination}.package-new-$$"
     rm -f "$temporary"
     cp -f "$source" "$temporary" || return 1

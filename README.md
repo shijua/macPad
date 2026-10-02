@@ -2,11 +2,25 @@
 
 Your touch Mac in iPad.
 
+## iPadOS 17 / macOS 14 adaptation
+
+This fork's `codex/ipados17-sonoma14` branch adds compatibility work for an
+M1 iPad Pro running iPadOS 17.0 (21A329), Dopamine 3.0.10 and macOS 14.0
+(23A344). Basic desktop presentation and Launchpad folder rendering are
+verified on the configured device. Full upstream feature parity and a fresh
+device installation are still pending.
+
+See the dedicated [iPadOS 17 + macOS 14 update notes (中文)](docs/ipados17-macos14-update.md)
+for verified features, known issues, changes and test results.
+
 Run macOS GUI applications in your jailbroken iPad/iPhone. Demo video:
 
 [![macPad Demo](https://img.youtube.com/vi/SGaiSSRIy8g/0.jpg)](https://www.youtube.com/watch?v=SGaiSSRIy8g)
 
 Features:
+
+The following is the original feature list. It is not a validation checklist
+for the iPadOS 17/macOS 14 branch; use the coverage table linked above.
 
 * Touch Gestures:
     - Scroll
@@ -59,7 +73,7 @@ sudo bash /var/jb/usr/macOS/bin/run_bash.sh
 
 ## Note
 
-* Only test on iPad Pro m1 11-inch, iPadOS 16.3, dopamine jailbroken, macOS 13.4
+* Original validation: iPad Pro m1 11-inch, iPadOS 16.3, dopamine jailbroken, macOS 13.4. This branch's iPadOS 17/macOS 14 validation is documented separately above.
 * In theory, support all m-series and A18 jailbroken iPad/iPhone. But there are many hardcoded logics for my device's OS version currently
 * Compared with [VirtualMacOniPad](https://github.com/nfzerox/VirtualMacOniPad), macPad uses native CPU and GPU drivers through chroot while VirtualBuddy uses hardware hypervirsor for CPU and mental2vulkan GPU  translation ([reims-vgpu](https://github.com/steelbrain/reims-vgpu)) which loss some performances
 * Compared with [MacWSBootingGuide](https://github.com/khanhduytran0/MacWSBootingGuide), it uses MTLSimDriver for GPU which has many graphic issues and performance problems while macPad uses native GPU drivers

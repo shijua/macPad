@@ -37,6 +37,7 @@
 #include "macws_settings_paths.h"
 #include "macws_production_policy.h"
 #include "macws_chroot_identity.h"
+#include "macws_skylight_surface_ownership.h"
 #include "macws_nocopy_abi.h"
 #import "MacWSFinalCompositePublisher.h"
 
@@ -2155,9 +2156,10 @@ static void macws_record_xpc_service_context_if_requested(void) {
 // login-completion bit for MacWS's exact shared synthetic audit session and
 // exact pre-login placeholder identity. A future real loginwindow session, a
 // different audit session, or an already-complete login remains untouched.
-typedef CFDictionaryRef (*macws_copy_cgsession_fn)(void);
-static macws_copy_cgsession_fn macws_cgsession_private_orig = NULL;
-static macws_copy_cgsession_fn macws_cgsession_public_orig = NULL;
+extern CFDictionaryRef CGSSessionCopyCurrentSessionProperties(void)
+    __attribute__((weak_import));
+extern CFDictionaryRef CGSessionCopyCurrentDictionary(void)
+    __attribute__((weak_import));
 
 static BOOL macws_cgsession_is_prelogin_placeholder(CFDictionaryRef session) {
     if (!session || CFGetTypeID(session) != CFDictionaryGetTypeID()) return NO;
@@ -2244,39 +2246,25 @@ static CFDictionaryRef macws_cgsession_complete_login_handoff(
 
 static CFDictionaryRef macws_cgsession_private_compat(void) {
     return macws_cgsession_complete_login_handoff(
-        macws_cgsession_private_orig
-            ? macws_cgsession_private_orig() : NULL);
+        CGSSessionCopyCurrentSessionProperties
+            ? CGSSessionCopyCurrentSessionProperties() : NULL);
 }
 
 static CFDictionaryRef macws_cgsession_public_compat(void) {
     return macws_cgsession_complete_login_handoff(
-        macws_cgsession_public_orig
-            ? macws_cgsession_public_orig() : NULL);
+        CGSessionCopyCurrentDictionary
+            ? CGSessionCopyCurrentDictionary() : NULL);
 }
 
-static void macws_install_cgsession_login_handoff_compatibility(void) {
-    // The provider is an AppKit login-state dependency.  Headless tools and
-    // daemons cannot consume this result, and patching the shared-cache entry
-    // while a short-lived utility is still in dyld initialization can block
-    // ElleKit's stop-the-world allocator.  Use framework capability rather
-    // than an executable-name list: every real consumer has NSApplication
-    // loaded before this constructor, while defaults/cfprefsd do not.
-    if (!objc_getClass("NSApplication")) return;
-    void *privateProvider = dlsym(
-        RTLD_DEFAULT, "CGSSessionCopyCurrentSessionProperties");
-    void *publicProvider = dlsym(
-        RTLD_DEFAULT, "CGSessionCopyCurrentDictionary");
-    if (privateProvider) {
-        MSHookFunction(privateProvider,
-                       (void *)macws_cgsession_private_compat,
-                       (void **)&macws_cgsession_private_orig);
-    }
-    if (publicProvider && publicProvider != privateProvider) {
-        MSHookFunction(publicProvider,
-                       (void *)macws_cgsession_public_compat,
-                       (void **)&macws_cgsession_public_orig);
-    }
-}
+// A Sonoma AppKit/USR00 control reaches a non-executable data page after the
+// constructor's MSHookFunction rewrite of this provider; the identical call
+// without heavy constructors returns normally. Keep the real provider and
+// login-field translation at dyld's binding boundary, leaving its code intact.
+// Calls from this replacement image resolve to the original provider.
+DYLD_INTERPOSE(macws_cgsession_private_compat,
+                CGSSessionCopyCurrentSessionProperties);
+DYLD_INTERPOSE(macws_cgsession_public_compat,
+                CGSessionCopyCurrentDictionary);
 
 // Focused Launchpad source-import diagnostic.  Ventura's Dock owns the
 // LPAppManager/LPAppSource implementation, so observing these real method
@@ -7469,11 +7457,11 @@ static void macws_vnc_release(id obj) {
 }
 
 static IOSurfaceRef macws_vnc_bound_surface(id<MTLTexture> texture) {
-    if (!texture) return NULL;
-    void *implementation =
-        *(void **)((char *)(__bridge void *)texture + 0x208);
-    return (uintptr_t)implementation > 0x1000
-        ? *(IOSurfaceRef *)((char *)implementation + 0xa0) : NULL;
+    // Sonoma's actual texture stores 0x2580 at the former implementation
+    // offset; dereferencing it crashed EndUpdate. Ask the texture for its
+    // real backing surface instead of assuming a driver-private layout.
+    return texture && [texture respondsToSelector:@selector(iosurface)]
+        ? [texture iosurface] : NULL;
 }
 
 // Content-backed first-frame classifier. Percentage coverage rejected a
@@ -9202,10 +9190,7 @@ static void macws_vnc_process_completion_observation(
         access("/tmp/macws_inspect_failed_pf550", F_OK) == 0;
     if (completedCleanly || inspectFailedPF550) {
         if (completedPF == 550) {
-            void *implementation =
-                *(void **)((char *)(__bridge void *)texture + 0x208);
-            IOSurfaceRef surface = (uintptr_t)implementation > 0x1000
-                ? *(IOSurfaceRef *)((char *)implementation + 0xa0) : NULL;
+            IOSurfaceRef surface = macws_vnc_bound_surface(texture);
             if (surface) {
                 if (inspectFailedPF550) {
                     fprintf(stderr,
@@ -12475,6 +12460,8 @@ static void macws_log_plain_texture_surface_layout(
 }
 
 - (id<MTLTexture>)hooked_newTextureWithDescriptor:(MTLTextureDescriptor *)desc {
+    void *caller = ptrauth_strip(__builtin_return_address(0),
+                                  ptrauth_key_return_address);
     desc = macws_native_agx_texture_descriptor(desc, "plain");
     if (getenv("MACWS_TEX_TRACE") != NULL) {
         macws_log_mtldesc(desc, NULL, 0, "plain.IN");
@@ -13034,7 +13021,7 @@ static void macws_log_plain_texture_surface_layout(
                             [oldestEntry[@"surface"] pointerValue];
                         NSUInteger evictedBytes =
                             [oldestEntry[@"bytes"] unsignedIntegerValue];
-                        if (macws_runtime_diagnostics_enabled())
+                            if (macws_runtime_diagnostics_enabled())
                             leaseEvictCount++;
                         if (leaseEvictCount &&
                             (leaseEvictCount <= 32 ||
@@ -13071,6 +13058,24 @@ static void macws_log_plain_texture_surface_layout(
         // AGXG13GFamilyDevice swizzle (different entry point than the
         // IOGPUMetalDevice iosurface variant). See macws_disp_fill_track.
         macws_disp_fill_track(tex, surf);
+        // Sonoma WS::Surface's destructor releases texture.iosurface before
+        // releasing the texture. Its explicit-IOSurface constructor supplies
+        // that +1 via WSIOSurfaceCreateWithFormat; its plain constructor assumes
+        // texture.iosurface is NULL. Our compatibility allocator changes that
+        // assumption, so transfer a separate +1 to each new WS::Surface lease.
+        // RE: SkyLight 42FD2E33-2BB2-372F-A01F-B2B36C8277B9,
+        // plain constructor LR +0x5baac, destructor CFRelease +0x5b254.
+        // Runtime: sonoma-lease-release-evidence.log shows this destructor
+        // consuming the pool retain, then IOGPUMetalTexture dealloc consumes
+        // the last retain before the eviction's CFRelease traps.
+        Dl_info callerInfo = {0};
+        if (caller && dladdr(caller, &callerInfo) && callerInfo.dli_fbase &&
+            macws_skylight_surface_owner_call(
+                (uintptr_t)caller - (uintptr_t)callerInfo.dli_fbase) &&
+            macws_macho_has_uuid(callerInfo.dli_fbase,
+                                 macws_sonoma_skylight_surface_uuid)) {
+            CFRetain(surf);
+        }
         // Do not release `surf` here.  Its create retain is owned by the pool
         // entry and released exactly once when that idle entry is evicted.
         return tex;
@@ -16771,6 +16776,105 @@ static id macws_compute_pipeline_descriptor_error_diag(
     return result;
 }
 
+static void macws_log_pipeline_function_storage(
+        const char *stage, id function) {
+    if (!function) return;
+    Class concrete = object_getClass(function);
+    size_t object_size = class_getInstanceSize(concrete);
+    Ivar function_data = NULL;
+    for (Class cls = concrete; cls; cls = class_getSuperclass(cls)) {
+        function_data = class_getInstanceVariable(cls, "_functionData");
+        if (function_data) break;
+    }
+    ptrdiff_t offset = function_data ? ivar_getOffset(function_data) : -1;
+    const char *type = function_data
+        ? ivar_getTypeEncoding(function_data) : NULL;
+    if (offset < 0 || !type ||
+        !strstr(type, "\"sourceArchiveOffset\"Q\"airMajorVersion\"S"
+                      "\"airMinorVersion\"S") ||
+        (size_t)offset > object_size ||
+        object_size - (size_t)offset <
+            5 * sizeof(uint64_t) + 4 * sizeof(uint16_t)) {
+        dprintf(STDERR_FILENO,
+            "#### METAL-FUNCTION-VERSION stage=%s class=%s layout=unknown\n",
+            stage, class_getName(concrete));
+        return;
+    }
+    uint16_t versions[4] = {0};
+    const uint8_t *function_bytes =
+        (const uint8_t *)(__bridge const void *)function;
+    memcpy(versions, function_bytes + offset + 5 * sizeof(uint64_t),
+           sizeof(versions));
+    dprintf(STDERR_FILENO,
+        "#### METAL-FUNCTION-VERSION stage=%s class=%s air=%u.%u "
+        "language=%u.%u\n", stage, class_getName(concrete),
+        versions[0], versions[1], versions[2], versions[3]);
+
+    // Diagnostic-only witness: keep the complete private field layout and a
+    // bounded raw snapshot so version-like words can be mapped back to their
+    // actual MTLFunctionData fields instead of inferred from error formatting.
+    size_t dump_size = object_size - (size_t)offset;
+    if (dump_size > 128) dump_size = 128;
+    char dump_hex[128 * 2 + 1];
+    for (size_t i = 0; i < dump_size; i++)
+        snprintf(dump_hex + i * 2, sizeof(dump_hex) - i * 2,
+                 "%02x", function_bytes[offset + i]);
+    dump_hex[dump_size * 2] = '\0';
+    dprintf(STDERR_FILENO,
+        "#### METAL-FUNCTION-DATA stage=%s type=%s objectSize=%zu "
+        "ivarOffset=%td bytes=%s\n", stage, type, object_size, offset,
+        dump_hex);
+}
+
+typedef id (*macws_function_init_with_data_fn)(
+    id, SEL, NSString *, NSUInteger, id, const void *, id)
+    __attribute__((ns_returns_retained));
+static macws_function_init_with_data_fn
+    g_macws_function_init_with_data_orig = NULL;
+
+// Read-only witness for the AIR version entering _MTLFunctionInternal.  The
+// macOS 13.4 initializer copies this 0x70-byte functionData record into the
+// object; record only the two minimal-probe functions while the explicit
+// pipeline diagnostic marker is present.
+static id macws_function_init_with_data_diag(
+        id self, SEL selector, NSString *name, NSUInteger type,
+        id library_data, const void *function_data, id device)
+        __attribute__((ns_returns_retained));
+static id macws_function_init_with_data_diag(
+        id self, SEL selector, NSString *name, NSUInteger type,
+        id library_data, const void *function_data, id device) {
+    const char *name_text = name.UTF8String;
+    bool probe_function = name_text &&
+        (strcmp(name_text, "SimpleColorVertex") == 0 ||
+         strcmp(name_text, "SimpleColorFragment") == 0);
+    if (macws_pipeline_diag_enabled() && probe_function && function_data) {
+        static _Atomic uint32_t capture_count = 0;
+        uint32_t sequence = atomic_fetch_add(&capture_count, 1) + 1;
+        if (sequence <= 16) {
+            const uint8_t *bytes = (const uint8_t *)function_data;
+            uint16_t versions[4] = {0};
+            memcpy(versions, bytes + 5 * sizeof(uint64_t),
+                   sizeof(versions));
+            char data_hex[0x70 * 2 + 1];
+            for (size_t i = 0; i < 0x70; i++)
+                snprintf(data_hex + i * 2, sizeof(data_hex) - i * 2,
+                         "%02x", bytes[i]);
+            data_hex[sizeof(data_hex) - 1] = '\0';
+            dprintf(STDERR_FILENO,
+                "#### METAL-FUNCTION-DATA-INPUT #%u name=%s type=%lu "
+                "air=%u.%u language=%u.%u libraryData=%p bytes=%s\n",
+                sequence, name_text, (unsigned long)type,
+                versions[0], versions[1], versions[2], versions[3],
+                library_data,
+                data_hex);
+        }
+    }
+    return g_macws_function_init_with_data_orig
+        ? g_macws_function_init_with_data_orig(
+            self, selector, name, type, library_data, function_data, device)
+        : nil;
+}
+
 static void macws_log_pipeline_result(uint32_t sequence, id device,
                                       MTLRenderPipelineDescriptor *descriptor,
                                       id result, NSError *error,
@@ -16822,6 +16926,16 @@ static void macws_log_pipeline_result(uint32_t sequence, id device,
         error ? (long)error.code : 0L,
         error ? error.localizedDescription.UTF8String : "(nil)",
         error ? error.userInfo.description.UTF8String : "(nil)");
+    if (macws_pipeline_diag_enabled() && !result && error &&
+        [error.localizedDescription containsString:@"deployment target"]) {
+        static _Atomic uint32_t version_dump_count = 0;
+        if (atomic_fetch_add(&version_dump_count, 1) == 0) {
+            macws_log_pipeline_function_storage(
+                "vertex", descriptor.vertexFunction);
+            macws_log_pipeline_function_storage(
+                "fragment", descriptor.fragmentFunction);
+        }
+    }
 }
 
 static void macws_log_vertex_descriptor(
@@ -21645,10 +21759,71 @@ static id macws_desktop_specialized_function_compat(
         id base_function = library
             ? [library newFunctionWithName:name] : nil;
         if (base_function && base_function != self) {
+            BOOL version_diagnostic = macws_pipeline_diag_enabled() &&
+                ([name isEqualToString:@"fixed_frag_lph_cpf"] ||
+                 [name isEqualToString:@"UberResampleLanczosFragmentBGRA"]);
+            if (version_diagnostic) {
+                static _Atomic uint32_t specialization_trace_count = 0;
+                version_diagnostic = atomic_fetch_add(
+                    &specialization_trace_count, 1) == 0;
+            }
+            if (version_diagnostic) {
+                Dl_info origin = {0};
+                void *imp = ptrauth_strip(
+                    (void *)g_macws_desktop_function_specialize_orig,
+                    ptrauth_key_function_pointer);
+                dladdr(imp, &origin);
+                dprintf(STDERR_FILENO,
+                    "#### METAL-SPECIALIZATION-ORIGIN name=%s "
+                    "image=%s offset=%#llx\n", name.UTF8String,
+                    origin.dli_fname ?: "(unknown)",
+                    origin.dli_fbase
+                        ? (unsigned long long)((uintptr_t)imp -
+                            (uintptr_t)origin.dli_fbase) : 0);
+                SEL async_selector = sel_registerName(
+                    "newSpecializedFunctionWithDescriptor:destinationArchive:"
+                    "functionCache:sync:completionHandler:");
+                Method async_method = class_getInstanceMethod(
+                    object_getClass(base_function), async_selector);
+                if (async_method) {
+                    void *async_imp = ptrauth_strip(
+                        (void *)method_getImplementation(async_method),
+                        ptrauth_key_function_pointer);
+                    Dl_info async_origin = {0};
+                    dladdr(async_imp, &async_origin);
+                    dprintf(STDERR_FILENO,
+                        "#### METAL-SPECIALIZATION-ASYNC class=%s "
+                        "image=%s offset=%#llx\n",
+                        class_getName(object_getClass(base_function)),
+                        async_origin.dli_fname ?: "(unknown)",
+                        async_origin.dli_fbase
+                            ? (unsigned long long)((uintptr_t)async_imp -
+                                (uintptr_t)async_origin.dli_fbase) : 0);
+                }
+                if (g_macws_desktop_function_specialize_async_orig) {
+                    void *async_orig = ptrauth_strip(
+                        (void *)g_macws_desktop_function_specialize_async_orig,
+                        ptrauth_key_function_pointer);
+                    Dl_info async_origin = {0};
+                    dladdr(async_orig, &async_origin);
+                    dprintf(STDERR_FILENO,
+                        "#### METAL-SPECIALIZATION-ASYNC-ORIGINAL "
+                        "image=%s offset=%#llx\n",
+                        async_origin.dli_fname ?: "(unknown)",
+                        async_origin.dli_fbase
+                            ? (unsigned long long)((uintptr_t)async_orig -
+                                (uintptr_t)async_origin.dli_fbase) : 0);
+                }
+                macws_log_pipeline_function_storage(
+                    "specialization-base", base_function);
+            }
             NSError *compatibility_error = nil;
             id specialized = g_macws_desktop_function_specialize_orig(
                 base_function, selector, descriptor, destination_archive,
                 function_cache, &compatibility_error);
+            if (version_diagnostic)
+                macws_log_pipeline_function_storage(
+                    "specialization-result", specialized);
             if (specialized) {
                 objc_setAssociatedObject(specialized, kMacWSMetal2MetalCompanionFunctionKey,
                     macws_metal2metal_runtime_objects()->companionMarker,
@@ -21969,6 +22144,29 @@ static void macws_install_qc_desktop_function_compatibility(void) {
     }
 
     Class function_class = objc_getClass("_MTLFunctionInternal");
+    if (macws_pipeline_diag_enabled() && function_class) {
+        SEL init_selector = sel_registerName(
+            "initWithName:type:libraryData:functionData:device:");
+        Method init_method = class_getInstanceMethod(
+            function_class, init_selector);
+        if (init_method && method_getImplementation(init_method) !=
+                               (IMP)macws_function_init_with_data_diag) {
+            IMP original = method_getImplementation(init_method);
+            g_macws_function_init_with_data_orig =
+                (macws_function_init_with_data_fn)original;
+            const char *types = method_getTypeEncoding(init_method);
+            if (!class_addMethod(function_class, init_selector,
+                    (IMP)macws_function_init_with_data_diag, types)) {
+                method_setImplementation(init_method,
+                    (IMP)macws_function_init_with_data_diag);
+            }
+            dprintf(STDERR_FILENO,
+                "#### METAL-FUNCTION-DATA-INPUT installed class=%s "
+                "selector=%s original=%p types=%s\n",
+                class_getName(function_class), sel_getName(init_selector),
+                (void *)original, types ?: "(null)");
+        }
+    }
     SEL function_selector = sel_registerName(
         "newSpecializedFunctionWithDescriptor:destinationArchive:"
         "functionCache:error:");
@@ -23366,9 +23564,19 @@ static macws_qtn_proc_get_flags_fn g_macws_qtn_proc_get_flags = NULL;
 static uint32_t g_macws_iconservices_emulated_qtn_flags = 0;
 
 static int macws_qtn_proc_init_with_self(void *process) {
+    if (macws_runtime_diagnostics_enabled()) {
+        fprintf(stderr,
+            "#### ICONSERVICES qtn self enter process=%p original=%p\n",
+            process, (void *)g_macws_orig_qtn_proc_init_with_self);
+    }
     int result = g_macws_orig_qtn_proc_init_with_self
         ? g_macws_orig_qtn_proc_init_with_self(process) : -1;
     int originalError = errno;
+    if (macws_runtime_diagnostics_enabled()) {
+        fprintf(stderr,
+            "#### ICONSERVICES qtn self returned result=%d errno=%d\n",
+            result, originalError);
+    }
     if (result != 0 && originalError == 103 /* ENOPOLICY */ &&
         g_macws_iconservices_emulated_qtn_flags != 0 &&
         g_macws_orig_qtn_proc_init && g_macws_orig_qtn_proc_set_flags &&
@@ -23438,10 +23646,50 @@ static int macws_qtn_proc_apply_to_self(void *process) {
 static void macws_install_iconservices_quarantine_fallback(void) {
     const char *program = getprogname();
     if (!program || strcmp(program, "iconservicesagent") != 0) return;
+    static const uint8_t iconservicesagent_uuid[16] = {
+        0xc0, 0x89, 0x10, 0x64, 0x16, 0x33, 0x38, 0x83,
+        0xb0, 0x91, 0xb9, 0x0e, 0x64, 0x90, 0xe2, 0x70,
+    };
+    // RE-confirmed via 23A344 iconservicesagent +0x2b98..+0x2c34:
+    // the same quarantine fallback and flags=6 contract; dyld_info -fixups
+    // places the two address-diversified IA imports at +0x8090/+0x8078.
+    static const uint8_t sonoma_iconservicesagent_uuid[16] = {
+        0xf8, 0x67, 0xb5, 0xe6, 0x96, 0x11, 0x31, 0xad,
+        0x97, 0xed, 0x65, 0xaa, 0xec, 0xc9, 0xe0, 0xd9,
+    };
+    uintptr_t init_slot_offset = 0x8088, apply_slot_offset = 0x8070;
+    const struct mach_header *main_header = NULL;
+    uint32_t image_index = 0;
+    for (; image_index < _dyld_image_count(); image_index++) {
+        const struct mach_header *candidate = _dyld_get_image_header(image_index);
+        if (candidate && macws_macho_has_uuid(candidate, iconservicesagent_uuid)) {
+            main_header = candidate;
+            break;
+        }
+        if (candidate && macws_macho_has_uuid(candidate, sonoma_iconservicesagent_uuid)) {
+            main_header = candidate;
+            init_slot_offset = 0x8090;
+            apply_slot_offset = 0x8078;
+            break;
+        }
+    }
+    if (macws_runtime_diagnostics_enabled()) {
+        fprintf(stderr, "#### ICONSERVICES qtn image index=%u count=%u header=%p name=%s\n",
+                image_index, _dyld_image_count(), main_header,
+                main_header ? _dyld_get_image_name(image_index) : "missing");
+    }
     void *symbol = dlsym(RTLD_DEFAULT, "_qtn_proc_init_with_self");
-    if (!symbol) return;
-    MSHookFunction(symbol, (void *)macws_qtn_proc_init_with_self,
-                   (void **)&g_macws_orig_qtn_proc_init_with_self);
+    if (!main_header || !symbol) return;
+    g_macws_orig_qtn_proc_init_with_self =
+        (macws_qtn_proc_init_with_self_fn)symbol;
+    void *init_with_self_symbol = symbol;
+    if (macws_runtime_diagnostics_enabled()) {
+        Dl_info info = {0};
+        dladdr(symbol, &info);
+        fprintf(stderr,
+            "#### ICONSERVICES qtn interpose target=%p image=%s\n",
+            symbol, info.dli_fname ? info.dli_fname : "unknown");
+    }
     symbol = dlsym(RTLD_DEFAULT, "_qtn_proc_init");
     if (symbol) g_macws_orig_qtn_proc_init = (macws_qtn_proc_init_fn)symbol;
     symbol = dlsym(RTLD_DEFAULT, "_qtn_proc_set_flags");
@@ -23451,10 +23699,96 @@ static void macws_install_iconservices_quarantine_fallback(void) {
     if (symbol)
         g_macws_qtn_proc_get_flags = (macws_qtn_proc_get_flags_fn)symbol;
     symbol = dlsym(RTLD_DEFAULT, "_qtn_proc_apply_to_self");
-    if (symbol) {
-        MSHookFunction(symbol, (void *)macws_qtn_proc_apply_to_self,
-                       (void **)&g_macws_orig_qtn_proc_apply_to_self);
+    if (!symbol) return;
+    g_macws_orig_qtn_proc_apply_to_self =
+        (macws_qtn_proc_apply_to_self_fn)symbol;
+
+    // RE-confirmed by dyld_info -fixups on the UUID above: these are the
+    // address-diversified IA auth-bind slots for the two quarantine calls.
+    // dyld_dynamic_interpose left both slots unchanged at runtime, so patch
+    // only these verified imports instead of libquarantine's shared code.
+    uintptr_t *init_slot = (uintptr_t *)((uintptr_t)main_header + init_slot_offset);
+    uintptr_t *apply_slot = (uintptr_t *)((uintptr_t)main_header + apply_slot_offset);
+    if (ptrauth_strip((void *)*init_slot, ptrauth_key_asia) !=
+            ptrauth_strip(init_with_self_symbol, ptrauth_key_asia) ||
+        ptrauth_strip((void *)*apply_slot, ptrauth_key_asia) !=
+            ptrauth_strip(symbol, ptrauth_key_asia)) {
+        fprintf(stderr, "[macws] iconservicesagent: qtn import targets differ; leaving imports intact\n");
+        return;
     }
+    vm_size_t page_size = (vm_size_t)getpagesize();
+    vm_address_t page = (vm_address_t)init_slot & ~(page_size - 1);
+    if (((vm_address_t)apply_slot & ~(page_size - 1)) != page) return;
+    kern_return_t kr = vm_protect(mach_task_self(), page, page_size, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE);
+    if (kr == KERN_PROTECTION_FAILURE) {
+        // Runtime-confirmed on 23A344: the authenticated DATA_CONST import
+        // page rejects writable protection. Request a private copy before
+        // changing the verified imports, then restore read-only below.
+        kr = vm_protect(mach_task_self(), page, page_size, FALSE,
+                        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    }
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "[macws] iconservicesagent: qtn import page protection failed: %d\n", kr);
+        vm_address_t region = page;
+        vm_size_t region_size = 0;
+        vm_region_basic_info_data_64_t info = {0};
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        kern_return_t region_kr = vm_region_64(mach_task_self(), &region,
+            &region_size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+            &count, &object);
+        if (object != MACH_PORT_NULL)
+            mach_port_deallocate(mach_task_self(), object);
+        fprintf(stderr,
+            "[macws] qtn mapping diagnostic: slot=%#lx page=%#lx pageSize=%lu "
+            "region=%#lx size=%lu protection=%#x max=%#x shared=%d kr=%d\n",
+            (unsigned long)init_slot, (unsigned long)page,
+            (unsigned long)page_size, (unsigned long)region,
+            (unsigned long)region_size, info.protection,
+            info.max_protection, info.shared, region_kr);
+        if (macws_macho_has_uuid(main_header, sonoma_iconservicesagent_uuid) &&
+            region_kr == KERN_SUCCESS && region == page &&
+            region_size == page_size && info.protection == VM_PROT_READ &&
+            info.max_protection == (VM_PROT_READ | VM_PROT_WRITE) && !info.shared) {
+            vm_address_t replacement = 0;
+            kr = vm_allocate(mach_task_self(), &replacement, page_size, VM_FLAGS_ANYWHERE);
+            if (kr != KERN_SUCCESS) return;
+            memcpy((void *)replacement, (const void *)page, page_size);
+            uintptr_t *copied_init = (uintptr_t *)(replacement + ((uintptr_t)init_slot - page));
+            uintptr_t *copied_apply = (uintptr_t *)(replacement + ((uintptr_t)apply_slot - page));
+            // PAC is address-diversified for the final mapping, not the copy.
+            *copied_init = (uintptr_t)ptrauth_sign_unauthenticated(
+                ptrauth_strip((void *)macws_qtn_proc_init_with_self, ptrauth_key_asia),
+                ptrauth_key_asia, ptrauth_blend_discriminator(init_slot, 0));
+            *copied_apply = (uintptr_t)ptrauth_sign_unauthenticated(
+                ptrauth_strip((void *)macws_qtn_proc_apply_to_self, ptrauth_key_asia),
+                ptrauth_key_asia, ptrauth_blend_discriminator(apply_slot, 0));
+            kr = vm_protect(mach_task_self(), replacement, page_size, FALSE, VM_PROT_READ);
+            if (kr == KERN_SUCCESS) {
+                vm_address_t destination = page;
+                vm_prot_t current = 0, maximum = 0;
+                kr = vm_remap(mach_task_self(), &destination, page_size, 0,
+                    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+                    replacement, FALSE, &current, &maximum, VM_INHERIT_COPY);
+            }
+            vm_deallocate(mach_task_self(), replacement, page_size);
+            fprintf(stderr, "[macws] iconservicesagent: private qtn import remap result=%d\n", kr);
+        }
+        return;
+    }
+    *init_slot = (uintptr_t)ptrauth_sign_unauthenticated(
+        ptrauth_strip((void *)macws_qtn_proc_init_with_self, ptrauth_key_asia),
+        ptrauth_key_asia, ptrauth_blend_discriminator(init_slot, 0));
+    *apply_slot = (uintptr_t)ptrauth_sign_unauthenticated(
+        ptrauth_strip((void *)macws_qtn_proc_apply_to_self, ptrauth_key_asia),
+        ptrauth_key_asia, ptrauth_blend_discriminator(apply_slot, 0));
+    kr = vm_protect(mach_task_self(), page, page_size, FALSE, VM_PROT_READ);
+    if (kr != KERN_SUCCESS)
+        fprintf(stderr, "[macws] iconservicesagent: qtn import page restore failed: %d\n", kr);
+    if (macws_runtime_diagnostics_enabled())
+        fprintf(stderr, "#### ICONSERVICES qtn imports installed init=%#lx apply=%#lx\n",
+                (unsigned long)*init_slot, (unsigned long)*apply_slot);
 }
 
 xpc_connection_t (*orig_xpc_connection_create)(const char *name,
@@ -23739,7 +24073,6 @@ __attribute__((constructor)) static void InitMetalHooks() {
         macws_install_quartzcore_update_image);
 #endif
     macws_install_iconservices_quarantine_fallback();
-    macws_install_cgsession_login_handoff_compatibility();
     macws_install_launchpad_source_diagnostics();
     macws_install_app_lifecycle_diagnostics();
     macws_install_catalyst_frontboard_route();

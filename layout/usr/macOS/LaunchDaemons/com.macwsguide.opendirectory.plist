@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>XPC_SERVICE_NAME</key>
+		<string>com.macwsguide.opendirectory</string>
+		<key>__CFPREFERENCES_AVOID_DAEMON</key>
+		<string>1</string>
+		<key>__CF_USER_TEXT_ENCODING</key>
+		<string>0x0:0:0</string>
+	</dict>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>com.macwsguide.opendirectory</string>
+	<key>MachServices</key>
+	<dict>
+		<key>com.macwsguide.od.api</key>
+		<true/>
+		<key>com.macwsguide.od.libinfo</key>
+		<true/>
+		<key>com.macwsguide.od.libinfo_v1</key>
+		<true/>
+		<key>com.macwsguide.od.membership</key>
+		<true/>
+		<key>com.macwsguide.od.membership_v1</key>
+		<true/>
+		<key>com.macwsguide.od.osWatchdog</key>
+		<true/>
+		<key>com.macwsguide.od.rpc</key>
+		<true/>
+	</dict>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+		<string>0</string>
+		<string>0</string>
+		<string>/var/mnt/rootfs</string>
+		<string>/usr/libexec/opendirectoryd</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/var/jb/var/mobile/opendirectory.log</string>
+	<key>StandardOutPath</key>
+	<string>/var/jb/var/mobile/opendirectory.log</string>
+</dict>
+</plist>

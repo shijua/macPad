@@ -22,9 +22,9 @@
 #   --pace-us=N           diagnostic synthetic-completion pace (8333..500000)
 #   --runtime-cap=N        optional automation wall-clock cap (minimum 60s)
 #
-# The iOS-native temperature watchdog is mandatory.  There is deliberately no
-# option to disable it: every GUI mode and benchmark stays inside the same
-# thermal safety envelope.
+# The iOS-native temperature watchdog records every GUI session. Application
+# trust pauses under thermal pressure by default; an explicitly authorized
+# session can use MACWS_ALLOW_THERMAL_PRESSURE=1 to continue the trust scan.
 #
 # Why launchd jobs (and not just `OSXvnc &`):
 #   launchdchrootexec posix_spawn()s the target with POSIX_SPAWN_SETEXEC, so it
@@ -48,6 +48,8 @@ WINDOWSERVER_PLIST="$MACOS_DAEMONS/com.apple.WindowServer.plist"
 LAUNCHSERVICESD_PLIST="$MACOS_DAEMONS/com.apple.coreservices.launchservicesd.plist"
 SHAREDFILELISTD_PLIST="$MACOS_DAEMONS/com.apple.coreservices.sharedfilelistd.plist"
 MACOS_DISKARBITRATIOND_PLIST="$MACOS_DAEMONS/com.macwsguide.macos-diskarbitrationd.plist"
+OPENDIRECTORY_PLIST="$MACOS_DAEMONS/com.macwsguide.opendirectory.plist"
+ACCOUNT_POLICY_PLIST="$MACOS_DAEMONS/com.macwsguide.accountpolicy.plist"
 FILECOORDINATION_PLIST="$MACOS_DAEMONS/com.macwsguide.filecoordination.plist"
 SYSTEMSTATUSD_PLIST="$MACOS_DAEMONS/com.apple.systemstatusd.plist"
 FONTD_PLIST="$MACOS_DAEMONS/com.macwsguide.xtyped.plist"
@@ -776,6 +778,10 @@ stop_ws_dependents() {
     launchctl remove "$DESKTOP_SERVICES_HELPER_LABEL" 2>/dev/null
     launchctl unload "$AUTHD_PLIST" 2>/dev/null
     launchctl remove "$AUTHD_LABEL" 2>/dev/null
+    launchctl unload "$OPENDIRECTORY_PLIST" 2>/dev/null
+    launchctl remove com.macwsguide.opendirectory 2>/dev/null
+    launchctl unload "$ACCOUNT_POLICY_PLIST" 2>/dev/null
+    launchctl remove com.macwsguide.accountpolicy 2>/dev/null
     # This file is an output witness from the current interopd generation, not
     # persistent configuration. Never let a replacement process inherit an
     # apparently-ready provider from a dead generation.
@@ -901,6 +907,33 @@ stop_ws_dependents() {
     rm -f "$ROOTFS"/private/tmp/macws_menu_client.*.sock
     rm -f "$ROOTFS"/private/tmp/macws_menu_snapshot.*.bin
     rm -f "$ROOTFS"/private/tmp/macws_input_target.sock
+}
+
+# PAM evaluates the real local account through matching macOS directory and
+# account-policy daemons. Publish both before Terminal creates its login child.
+start_macos_directory_services() {
+    local item="" plist="" label="" pid="" waited=0
+    for item in "$ACCOUNT_POLICY_PLIST:com.macwsguide.accountpolicy" \
+                "$OPENDIRECTORY_PLIST:com.macwsguide.opendirectory"; do
+        plist=${item%%:*}
+        label=${item#*:}
+        [ -f "$plist" ] || { log "ERROR: directory service job missing: $plist"; return 1; }
+        if ! launchctl list "$label" >/dev/null 2>&1; then
+            launchctl load "$plist" || return 1
+        fi
+        waited=0
+        while [ "$waited" -lt 10 ]; do
+            pid=$(launchd_job_pid "$label")
+            case "$pid" in
+                ''|0|*[!0-9]*) ;;
+                *) kill -0 "$pid" 2>/dev/null && break ;;
+            esac
+            sleep 1
+            waited=$((waited + 1))
+        done
+        [ "$waited" -lt 10 ] || { log "ERROR: directory service exited: $label"; return 1; }
+    done
+    log "Private macOS directory and account-policy processes started."
 }
 
 start_macos_diskarbitrationd() {
@@ -1541,6 +1574,10 @@ application_trust_thermally_safe() {
             return 1
             ;;
     esac
+    if [ "${MACWS_ALLOW_THERMAL_PRESSURE:-0}" = 1 ]; then
+        log "THERMAL-OVERRIDE: explicitly allowed for this invocation; $THERMAL_LINE"
+        return 0
+    fi
     # Admission follows iPadOS's own aggregate pressure classification.  A
     # fixed battery-temperature cutoff rejected a measured `nominal` state at
     # 36.09 C during Repair Desktop, after the old session had already been
@@ -1556,6 +1593,10 @@ application_trust_thermally_safe() {
 
 restore_cold_boot_trust() {
     local path=""
+    local thermal_arguments=(--thermal-tool /var/jb/usr/macOS/bin/macwsthermal)
+    if [ "${MACWS_ALLOW_THERMAL_PRESSURE:-0}" = 1 ]; then
+        thermal_arguments=()
+    fi
     local boot_trust_helper=/var/jb/usr/macOS/bin/macws_boot_trust.py
     local boot_trust_cache="$ROOTFS/var/db/macws/boot-trust"
     BASE_TRUST_READY=0
@@ -1601,6 +1642,19 @@ restore_cold_boot_trust() {
         "$ROOTFS$CSNAMEDDATAD_BIN" \
         "$ROOTFS$CORESERVICESD_BIN" \
         "$ROOTFS$AUTHD_BIN" \
+        "$ROOTFS/usr/libexec/opendirectoryd" \
+        "$ROOTFS/usr/lib/pam/pam_nologin.so.2" \
+        "$ROOTFS/usr/lib/pam/pam_opendirectory.so.2" \
+        "$ROOTFS/usr/lib/pam/pam_uwtmp.so.2" \
+        "$ROOTFS/usr/lib/pam/pam_deny.so.2" \
+        "$ROOTFS/usr/lib/pam/pam_krb5.so.2" \
+        "$ROOTFS/usr/lib/pam/pam_ntlm.so.2" \
+        "$ROOTFS/usr/lib/pam/pam_mount.so.2" \
+        "$ROOTFS/usr/lib/pam/pam_launchd.so.2" \
+        "$ROOTFS/System/Library/PrivateFrameworks/AccountPolicy.framework/XPCServices/com.apple.AccountPolicyHelper.xpc/Contents/MacOS/com.apple.AccountPolicyHelper" \
+        "$ROOTFS/System/Library/OpenDirectory/Modules/PlistFile.bundle/Contents/MacOS/PlistFile" \
+        "$ROOTFS/System/Library/OpenDirectory/Modules/search.bundle/Contents/MacOS/search" \
+        "$ROOTFS/System/Library/OpenDirectory/Modules/configure.bundle/Contents/MacOS/configure" \
         "$ROOTFS$DESKTOP_SERVICES_HELPER_BIN" \
         "$ROOTFS/System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary" \
         "$ROOTFS/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/XPCServices/com.apple.hiservices-xpcservice.xpc/Contents/MacOS/com.apple.hiservices-xpcservice" \
@@ -1677,7 +1731,7 @@ restore_cold_boot_trust() {
     /var/jb/usr/bin/python3 "$boot_trust_helper" \
         --manifest "$boot_trust_cache/hashes.json" \
         --resource-index "$boot_trust_cache/resources.sqlite" \
-        --thermal-tool /var/jb/usr/macOS/bin/macwsthermal \
+        "${thermal_arguments[@]}" \
         --hash b5da39409492ac85e5a8e8ab618fe77e2d7a2980 \
         --hash bbb765988e2677b98d47a549d612fa0d4af25f69 \
         "$@" || return 1
@@ -1869,6 +1923,20 @@ ensure_locationd_dirhelper_tree() {
 # Self-heal both post-reboot failure classes before starting WindowServer.
 # One postinst pass restores the base chroot plus every persistent executable
 # signature in VS Code's nested frameworks; both witnesses must pass afterward.
+ensure_rootfs_shaders() {
+    local version=""
+    version=$(/var/jb/usr/bin/python3 -c \
+        'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProductVersion"])' \
+        "$ROOTFS/System/Library/CoreServices/SystemVersion.plist") || return 1
+    if [ "$version" = 14.0 ]; then
+        /var/jb/usr/bin/python3 "${BASH_SOURCE[0]%/*}/ensure_sonoma_shaders.py" \
+            --root "$ROOTFS"
+    else
+        [ -f "$METAL2METAL_COMPAT_PROVISIONER" ] &&
+            bash "$METAL2METAL_COMPAT_PROVISIONER"
+    fi
+}
+
 ensure_chroot_works() {
     local chroot_ok=0 vscode_ok=0 cfprefs_ok=0
 
@@ -1897,8 +1965,7 @@ ensure_chroot_works() {
     # while every executable trust sentinel remains valid. Hash-check the
     # focused provisioner on every cold start; its matching path is one 1-MiB
     # read and performs no compiler or signing work.
-    if [ ! -f "$METAL2METAL_COMPAT_PROVISIONER" ] ||
-       ! bash "$METAL2METAL_COMPAT_PROVISIONER" \
+    if ! ensure_rootfs_shaders \
             > "$LOGDIR/quartzcore-compat.log" 2>&1; then
         log "ERROR: exact QuartzCore native-AGX compatibility library is unavailable."
         tail -n 20 "$LOGDIR/quartzcore-compat.log" 2>/dev/null || true
@@ -4815,6 +4882,9 @@ start_macos() {
     launchctl load "$INPUT_PLIST" || return 1
     launchctl remove "$WINDOWSERVER_LEGACY_LABEL" 2>/dev/null
     launchctl load "$WINDOWSERVER_PLIST" || return 1
+    # This job is on demand. Clients are deliberately held until the first
+    # frame, so explicitly start its real payload before waiting for that frame.
+    launchctl start "$WINDOWSERVER_LABEL" || return 1
     log "Waiting for WindowServer graphics initialization before GUI clients..."
     wait_for_initial_ws_ready "$ws_log_start_line" || return 1
     log "TIMING start-macos stage=windowserver seconds=$((SECONDS - macos_stage_started)) total=$((SECONDS - macos_started))"
@@ -4964,6 +5034,7 @@ start_macos() {
     started_ws_unchanged "OSXvnc pointer-proxy startup" || return 1
 
     if [ "$WANT_TERMINAL" = 1 ]; then
+        start_macos_directory_services || return 1
         log "Starting Terminal (launchd job '$TERM_LABEL')..."
         rm -f "$LOGDIR/terminal.log"
         launchctl load "$TERM_PLIST" || return 1

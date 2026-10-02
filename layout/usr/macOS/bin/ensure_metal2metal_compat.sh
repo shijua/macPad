@@ -37,6 +37,9 @@ metal2metal_runtime_stamp() {
 			/var/jb/usr/macOS/bin/ensure_metal2metal_compat.sh \
 			/var/jb/usr/macOS/bin/ensure_quartzcore_compat.sh \
 			"$METAL2METAL" \
+			/var/jb/usr/macOS/bin/metal2metal_profiles.py \
+			/var/jb/usr/macOS/bin/metal2metal_manifest.py \
+			/var/jb/usr/macOS/bin/repack_metallib_macabi.py \
 			"$OFFICE_PROVISIONER" \
 			"$APPLE_LLVM_DIS" "$APPLE_LLVM_AS" \
 			"$ROOTFS/System/Library/Frameworks/QuartzCore.framework/Versions/A/Resources/default.metallib" \
@@ -184,7 +187,7 @@ provision_route \
 	"$ROUTE_DIR/mpsimage-default.route.plist" \
 	"/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSImage.framework/Versions/A/Resources/default.metallib" \
 	"/usr/local/share/macws/mpsimage/default-desktop-effects-macabi.metallib" \
-	"84973060c51620471389178f7f00d6bde68f3fdf1609cda48072db46f7663916 342738608c912eab663879868288299e38147ea64d45b74f57bc0dd12761b2de" \
+	"84973060c51620471389178f7f00d6bde68f3fdf1609cda48072db46f7663916 342738608c912eab663879868288299e38147ea64d45b74f57bc0dd12761b2de ffa36cf7079780d40a463a34a0690b29fac31af0b8e8f6d53db98e121d967e0d" \
 	1 "$APPLE_LLVM_DIS" "$APPLE_LLVM_AS" || exit 1
 
 # Ventura MetalFX ships its temporal scaler network as one desktop-targeted
@@ -218,7 +221,7 @@ provision_route \
 	"$ROUTE_DIR/mpscore-default.route.plist" \
 	"/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSCore.framework/Versions/A/Resources/default.metallib" \
 	"/usr/local/share/macws/mpscore/default-compute-macabi.metallib" \
-	bc05c6dfc851d5d6acf760c9edde8bb3f449af5e0834cdab81f9e2f4092a0187 \
+	"bc05c6dfc851d5d6acf760c9edde8bb3f449af5e0834cdab81f9e2f4092a0187 cbc1fbb2a4e6c4be2b5587059d27688f0c720aaa1b9511c239cbce69889c4507" \
 	1 "$APPLE_LLVM_DIS" "$APPLE_LLVM_AS" || exit 1
 
 provision_route \
@@ -229,7 +232,7 @@ provision_route \
 	"$ROUTE_DIR/mpsndarray-default.route.plist" \
 	"/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSNDArray.framework/Versions/A/Resources/default.metallib" \
 	"/usr/local/share/macws/mpsndarray/default-compute-macabi.metallib" \
-	ff2d5117039292640d234037b4bc6f0081bb10d79d63a152ea72b1ec0de71ab1 \
+	"ff2d5117039292640d234037b4bc6f0081bb10d79d63a152ea72b1ec0de71ab1 c269f7abcb8262fff5c51cb7517e2d13fe92f6aa073cb8d9da5857985d03ec99" \
 	1 "$APPLE_LLVM_DIS" "$APPLE_LLVM_AS" || exit 1
 
 # Office embeds a desktop-target library inside an archive rather than a

@@ -16,6 +16,7 @@ libmachook_FILES = jit.m objc_hooks.c mac_hooks.m AppInputBridge.m AudioRenderBr
   ControlCenter_hooks.x Metal_hooks.x QuartzCore_hooks.x os_log_hooks.m \
   exec_hooks.c
 libmachook_FILES += Compatibility/MacWSOfficeMultiplyFilter.m
+libmachook_FILES += Compatibility/MacWSForkFix.c Compatibility/MacWSForkFix.S
 libmachook_FILES += Compatibility/MacWSSendfile.c
 libmachook_FILES += Compatibility/MacWSElectronPageAllocator.c
 libmachook_FRAMEWORKS = AudioToolbox CoreGraphics CoreImage ImageIO IOKit IOSurface Metal

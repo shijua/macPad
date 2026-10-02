@@ -18,6 +18,8 @@
 #import <stdarg.h>
 #import "interpose.h"
 #import "utils.h"
+#include "macws_sonoma_resource_abi.h"
+#include "macws_display_profiles.h"
 #import <sys/mman.h>
 #import <sys/stat.h>
 #import <fcntl.h>
@@ -1497,6 +1499,8 @@ static _Thread_local uint64_t g_macws_agx_initfull_len = 0;
 // this to translate physical-panel SwapEnd into SwapCancel while leaving the
 // rest of Apple's kern_SwapEnd cleanup intact.
 static _Atomic int g_macws_iomfb_coexist_swap_cancel = 0;
+static const struct macws_iomfb_display_profile *g_macws_iomfb_profile =
+    &macws_iomfb_ventura;
 static void macws_install_quartzcore_frame_info_hook(
     const struct mach_header *header);
 static void macws_install_quartzcore_coexist_pacing_hooks(
@@ -2739,6 +2743,25 @@ static void hooked_skylight_end_update(void *self, bool waitUntilSubmitted) {
     }
 }
 
+// RE-confirmed via Sonoma 23A344 SkyLight +0x13e34c: x2 is forwarded as
+// Flush's fourth argument. Its outermost depth remains self+0x178, and Flush
+// at +0x13d0a4 retains the committed command buffer at self+0x68. Preserve
+// both arguments; the Ventura wrapper cannot represent this ABI.
+typedef void (*EndUpdateSonoma_t)(void *self, bool waitUntilSubmitted,
+                                 bool flushOption);
+static EndUpdateSonoma_t orig_skylight_end_update_sonoma;
+static void hooked_skylight_end_update_sonoma(
+    void *self, bool waitUntilSubmitted, bool flushOption) {
+    bool outermost = self &&
+        *(volatile int32_t *)((char *)self + 0x178) == 1;
+    orig_skylight_end_update_sonoma(self, waitUntilSubmitted, flushOption);
+    if (outermost) {
+        g_macws_last_end_update_metal_context = self;
+        extern void macws_vnc_finish_update(void *);
+        macws_vnc_finish_update(self);
+    }
+}
+
 // SkyLight `WSCompositeDestinationCreateWithMetalTexture(MTLTexture*, MetalContext*, ...)`
 // — asserts texture != nil at CompositeDestinationMetal.mm:165. BN disasm
 // (SkyLight at 0x18523053c):
@@ -2907,6 +2930,33 @@ static void install_skylight_prepare_for_use_tolerate_nil_hook(const void *heade
     } else {
         fprintf(stderr,
             "#### SkyLight EndCurrentComposite(bool): symbol not found, skipped\n");
+    }
+
+    static const uint8_t sonoma_submission_uuid[16] = {
+        0x42, 0xfd, 0x2e, 0x33, 0x2b, 0xb2, 0x37, 0x2f,
+        0xa0, 0x1f, 0xb2, 0xb3, 0x6c, 0x82, 0x77, 0xb9,
+    };
+    if (header && macws_macho_uuid_matches(
+            (const struct mach_header_64 *)header, sonoma_submission_uuid)) {
+        void *target = (void *)((uintptr_t)header + 0x13e34c);
+        static const uint32_t expected[] = {
+            0xd503237f, 0xa9bd57f6, 0xa9014ff4, 0xa9027bfd,
+            0x910083fd, 0xb9417808, 0x7100011f, 0x540004ad,
+            0xaa0003f3, 0x71000508, 0xb9017808, 0x54000301,
+            0xaa0203f4, 0xaa0103f5,
+        };
+        if (memcmp(target, expected, sizeof(expected)) == 0) {
+            MSHookFunction(target,
+                (void *)hooked_skylight_end_update_sonoma,
+                (void **)&orig_skylight_end_update_sonoma);
+            fprintf(stderr,
+                "#### SkyLight Sonoma EndUpdate(bool,bool) submission "
+                "hook installed at %p\n", target);
+        } else {
+            fprintf(stderr,
+                "#### SkyLight Sonoma EndUpdate submission hook skipped: "
+                "instruction signature mismatch\n");
+        }
     }
 
     void *sym_end_update = MSFindSymbol(sl,
@@ -5620,9 +5670,21 @@ void loadImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) 
 
         // NSLog(@"#### debugbydcmmc loadImageCallback SkyLight modified");
     } else if(!strncmp(info.dli_fname, IOMFBPath, strlen(IOMFBPath))) {
+        BOOL sonoma_iomfb = macws_macho_uuid_matches(
+            (const struct mach_header_64 *)header, macws_iomfb_sonoma_uuid);
+        const struct macws_iomfb_display_profile *display_profile =
+            sonoma_iomfb ? &macws_iomfb_sonoma : &macws_iomfb_ventura;
+        // Validate Sonoma's swap ownership and cancel argument count before
+        // installing anything. The physical-panel protocol must stay real.
+        BOOL ownership_verified = !sonoma_iomfb || (
+            *(const uint32_t *)((uintptr_t)header + 0x57c8) == 0xb900b268 &&
+            *(const uint32_t *)((uintptr_t)header + 0x5b4c) == 0x52800681 &&
+            *(const uint32_t *)((uintptr_t)header + 0x5b50) == 0x52800023 &&
+            *(const uint32_t *)((uintptr_t)header + display_profile->submit) ==
+                display_profile->submit_instruction);
         // patch kern_SwapEnd passing correct inputStructCnt
         uint32_t *swapEnd = (uint32_t *)(OFF_IOMobileFramebuffer_kern_SwapEnd_inputStructCnt + (uintptr_t)header);
-        ModifyExecutableRegion(swapEnd, sizeof(uint32_t), ^{
+        if (!sonoma_iomfb) ModifyExecutableRegion(swapEnd, sizeof(uint32_t), ^{
             // NSLog(@"#### debugbydcmmc OFF_IOMobileFramebuffer_kern_SwapEnd_inputStructCnt ModifyExecutableRegion addr %lu val %lu, expect: %lu",
             //     (unsigned long) swapEnd, (unsigned long) *swapEnd, (unsigned long) 0x52808d03);
             // Patch only if the expected instruction is present; skip (do not
@@ -5643,15 +5705,18 @@ void loadImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) 
         // Substrate trampoline.  A second libmachook slice sees the modified
         // prologue and safely skips instead of stacking another hook.
         {
-            static const uint32_t expectedSwapEndWrapper[4] = {
+            const uint32_t expectedSwapEndWrapper[4] = {
                 0xb4000080, // cbz x0, +0x10
-                0xf9439401, // ldr x1, [x0, #0x728]
+                display_profile->dispatch_load,
                 0xb4000041, // cbz x1, +0x8
                 0xd61f083f, // braaz x1
             };
-            void *publicSwapEnd = (void *)((uintptr_t)header + 0x11cc);
-            if (memcmp(publicSwapEnd, expectedSwapEndWrapper,
+            void *publicSwapEnd = (void *)((uintptr_t)header +
+                display_profile->swap_end_wrapper);
+            if (ownership_verified &&
+                memcmp(publicSwapEnd, expectedSwapEndWrapper,
                        sizeof(expectedSwapEndWrapper)) == 0) {
+                g_macws_iomfb_profile = display_profile;
                 MSHookFunction(publicSwapEnd,
                     (void *)MacwsIOMobileFramebufferSwapEnd_new,
                     (void **)&g_macws_orig_iomfb_swap_end);
@@ -5692,8 +5757,10 @@ void loadImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) 
                strstr(exe, "SkyLight.framework/Resources/WindowServer") != NULL &&
                is_process_running("backboardd")) {
                 const uint32_t *swapSubmit = (const uint32_t *)(
-                    OFF_IOMobileFramebuffer_kern_SwapEnd_submit + (uintptr_t)header);
-                if (*swapSubmit == 0x94001f64) {
+                    display_profile->submit + (uintptr_t)header);
+                if (ownership_verified &&
+                    *swapSubmit == display_profile->submit_instruction) {
+                    g_macws_iomfb_profile = display_profile;
                     atomic_store(&g_macws_iomfb_coexist_swap_cancel, 1);
                     fprintf(stderr,
                         "#### COEXIST: verified kern_SwapEnd BL; SwapEnd(sel5) -> "
@@ -7165,6 +7232,30 @@ static void macws_crash_diag_handler(int signo, siginfo_t *info, void *uctx_) {
             (void*)uctx->uc_mcontext->__ss.__x[5],
             (void*)uctx->uc_mcontext->__ss.__x[6],
             (void*)uctx->uc_mcontext->__ss.__x[7]);
+        // Runtime QuartzCore shader failure preserves abort_with_payload's
+        // namespace13/code7 arguments in this signal context. Read only that
+        // bounded diagnostic payload; never dereference an unchecked pointer.
+        if (signo == SIGABRT &&
+            uctx->uc_mcontext->__ss.__x[0] == 13 &&
+            uctx->uc_mcontext->__ss.__x[1] == 7) {
+            char reason[513] = {0}, payload[1025] = {0};
+            mach_vm_size_t got = 0;
+            kern_return_t kr = mach_vm_read_overwrite(
+                mach_task_self(), uctx->uc_mcontext->__ss.__x[4],
+                sizeof(reason) - 1, (mach_vm_address_t)reason, &got);
+            APPEND("####   shader abort reason kr=%d bytes=%llu: %.*s\n",
+                kr, (unsigned long long)got,
+                kr == KERN_SUCCESS ? (int)got : 0, reason);
+            mach_vm_size_t size = uctx->uc_mcontext->__ss.__x[3];
+            if (size > sizeof(payload) - 1) size = sizeof(payload) - 1;
+            got = 0;
+            kr = size ? mach_vm_read_overwrite(
+                mach_task_self(), uctx->uc_mcontext->__ss.__x[2], size,
+                (mach_vm_address_t)payload, &got) : KERN_INVALID_ARGUMENT;
+            APPEND("####   shader abort payload kr=%d bytes=%llu: %.*s\n",
+                kr, (unsigned long long)got,
+                kr == KERN_SUCCESS ? (int)got : 0, payload);
+        }
         APPEND("####   regs x8=%p x9=%p x10=%p x11=%p\n",
             (void*)uctx->uc_mcontext->__ss.__x[8],
             (void*)uctx->uc_mcontext->__ss.__x[9],
@@ -7221,6 +7312,21 @@ static void macws_crash_diag_handler(int signo, siginfo_t *info, void *uctx_) {
         // If fault_addr == pc, this is an instruction-fetch fault. Try to
         // read the 16 bytes at pc to see whether the page is even readable.
         if (pc && fault_addr == pc) {
+            mach_vm_address_t region = (mach_vm_address_t)pc;
+            mach_vm_size_t region_size = 0;
+            vm_region_basic_info_data_64_t region_info = {0};
+            mach_msg_type_number_t region_count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t region_object = MACH_PORT_NULL;
+            kern_return_t region_kr = mach_vm_region(
+                mach_task_self(), &region, &region_size,
+                VM_REGION_BASIC_INFO_64, (vm_region_info_t)&region_info,
+                &region_count, &region_object);
+            APPEND("####   pc region kr=%d start=%p size=%#llx prot=%#x max=%#x inheritance=%d shared=%d\n",
+                region_kr, (void *)region, (unsigned long long)region_size,
+                region_info.protection, region_info.max_protection,
+                region_info.inheritance, region_info.shared);
+            if (region_object != MACH_PORT_NULL)
+                mach_port_deallocate(mach_task_self(), region_object);
             uint32_t insn[4] = {0,0,0,0};
             mach_vm_size_t igot = 0;
             kern_return_t ikr = mach_vm_read_overwrite(
@@ -10949,6 +11055,15 @@ static void macws_install_target_feature_flag_compatibility(void) {
 }
 
 __attribute__((constructor)) void InitStuff() {
+    const char *constructor_diag = getenv("MACWS_AGX_CRASH_DIAG");
+    if (constructor_diag && strcmp(constructor_diag, "1") == 0) {
+        dprintf(STDERR_FILENO,
+                "MACWS INIT entry pid=%d program=%s utility=%s shell=%s preferences=%s\n",
+                getpid(), getprogname() ?: "<nil>",
+                getenv("MACWS_UTILITY_PROCESS") ?: "<unset>",
+                getenv("VSCODE_RESOLVING_ENVIRONMENT") ?: "<unset>",
+                getenv("MACWS_CFPREFERENCES_CLIENT") ?: "<unset>");
+    }
     atomic_store_explicit(&g_macws_libsystem_runtime_ready, true,
                           memory_order_release);
     macws_install_pkd_signed_entitlements_adapter();
@@ -11112,7 +11227,11 @@ __attribute__((constructor)) void InitStuff() {
         }
     }
 
+    if (constructor_diag && strcmp(constructor_diag, "1") == 0)
+        dprintf(STDERR_FILENO, "MACWS INIT registering image callback\n");
     _dyld_register_func_for_add_image((void (*)(const struct mach_header *, intptr_t))loadImageCallback);
+    if (constructor_diag && strcmp(constructor_diag, "1") == 0)
+        dprintf(STDERR_FILENO, "MACWS INIT image callback registered\n");
 
     // System Settings requests every sidebar image before the first main-queue
     // turn. Force its already-declared IconServices dependency to realize its
@@ -12310,6 +12429,36 @@ extern kern_return_t mach_vm_remap(
     vm_prot_t *current_protection, vm_prot_t *maximum_protection,
     vm_inherit_t inheritance);
 
+typedef kern_return_t (*MacWSKernelObjectQuery)(
+    ipc_space_read_t, mach_port_name_t, unsigned *, unsigned *);
+
+static bool macws_core_services_is_map_bridge_port(mach_port_t port) {
+    static MacWSKernelObjectQuery query = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        query = (MacWSKernelObjectQuery)dlsym(
+            RTLD_DEFAULT, "mach_port_kernel_object");
+    });
+    unsigned kind = 0, address = 0;
+    kern_return_t result = query
+        ? query(mach_task_self(), port, &kind, &address)
+        : KERN_NOT_SUPPORTED;
+    // Runtime-confirmed on 23A344/21A329: coreservicesd also maps into a
+    // genuine kernel-object port (kind2). Sending our MWCM protocol there
+    // raises EXC_GUARD/INVALID_OPTIONS. Only a userspace message queue can
+    // represent the client bridge; keep kernel mappings on their native API.
+    if (result != KERN_SUCCESS || kind != 0) {
+        if (macws_runtime_diagnostics_enabled()) {
+            dprintf(STDERR_FILENO,
+                    "#### CORESERVICES-MAP-BRIDGE native-target pid=%d "
+                    "port=%u query=%#x kind=%u\n",
+                    getpid(), port, result, kind);
+        }
+        return false;
+    }
+    return true;
+}
+
 static bool macws_core_services_bridge_map(
     vm_map_t targetTask, mach_vm_address_t *address, mach_vm_size_t size,
     mach_vm_offset_t mask, int flags, mach_port_t object,
@@ -12326,6 +12475,8 @@ static bool macws_core_services_bridge_map(
         !MACH_PORT_VALID(object) || !resultOut) {
         return false;
     }
+
+    if (!macws_core_services_is_map_bridge_port(targetTask)) return false;
 
     mach_port_t replyPort = MACH_PORT_NULL;
     kern_return_t setupResult = mach_port_allocate(
@@ -14055,6 +14206,25 @@ static const char *macws_private_bootstrap_lsd_service_name(const char *name) {
 
 static const char *macws_private_bootstrap_service_name(const char *name) {
     if (!name) return name;
+    // Runtime-confirmed Sonoma PAM requests the stock OD API. Its local-node
+    // and account-policy protocols work when hosted by the matching daemons.
+    static const char *directoryPublic[] = {
+        "com.apple.opendirectoryd.osWatchdog",
+        "com.apple.private.opendirectoryd.rpc",
+        "com.apple.system.DirectoryService.libinfo_v1",
+        "com.apple.system.DirectoryService.membership_v1",
+        "com.apple.system.opendirectoryd.api",
+        "com.apple.system.opendirectoryd.libinfo",
+        "com.apple.system.opendirectoryd.membership"
+    };
+    static const char *directoryPrivate[] = {
+        "com.macwsguide.od.osWatchdog", "com.macwsguide.od.rpc",
+        "com.macwsguide.od.libinfo_v1", "com.macwsguide.od.membership_v1",
+        "com.macwsguide.od.api", "com.macwsguide.od.libinfo",
+        "com.macwsguide.od.membership"
+    };
+    for (size_t i = 0; i < sizeof(directoryPublic) / sizeof(directoryPublic[0]); i++)
+        if (!strcmp(name, directoryPublic[i])) return directoryPrivate[i];
     // The settings-extension launch proxy is the first iOS image submitted to
     // RunningBoard, so launchd allocates its managed endpoints under the proxy
     // unique bundle identifier. Ventura derives each peer name from the real
@@ -15068,6 +15238,9 @@ xpc_connection_t macws_xpc_connection_create_listener_early(
 xpc_connection_t macws_xpc_connection_create_early(
     const char *name, dispatch_queue_t targetq) {
     macws_trace_xpc_name("xpc_service", name);
+    if (name && !strcmp(name, "com.apple.AccountPolicyHelper"))
+        return macws_xpc_connection_create_mach_service_raw(
+            "com.macwsguide.od.accountpolicy", targetq, 0);
     if (name && !strcmp(name, QUICKLOOK_SATELLITE_ORIG)) {
         xpc_connection_t connection =
             macws_xpc_connection_create_mach_service_raw(
@@ -15293,6 +15466,14 @@ void macws_xpc_main(xpc_connection_handler_t handler) {
     } else if (program && strcmp(program, "authd") == 0 && service &&
                strcmp(service, "com.macwsguide.authd") == 0) {
         privateMachService = AUTHD_SERVICE_NEW;
+    } else if (program &&
+               strcmp(program, "com.apple.AccountPolicyHelper") == 0 &&
+               service &&
+               strcmp(service, "com.macwsguide.accountpolicy") == 0) {
+        // Sonoma main+0x8c calls xpc_main. The chroot launchd context is
+        // rejected as unmanaged; retain the stock policy handler on a real
+        // private listener, just like authd above.
+        privateMachService = "com.macwsguide.od.accountpolicy";
     } else if (program && strcmp(program, "QuickLookSatellite") == 0 &&
                service && strcmp(service,
                     "com.macwsguide.quicklook-satellite") == 0) {
@@ -17802,6 +17983,8 @@ typedef void (*MacwsEnableFrameInfoTagListFunction)(
 static MacwsEnableFrameInfoTagListFunction
     g_macws_orig_enable_frame_info_tag_list = NULL;
 static uintptr_t g_macws_quartzcore_header = 0;
+static const struct macws_quartzcore_display_profile *g_macws_qc_profile =
+    &macws_qc_ventura;
 
 static void macws_enable_frame_info_tag_list(
     void *server, const char *const *available_tags, size_t available_count,
@@ -17814,12 +17997,12 @@ static void macws_enable_frame_info_tag_list(
     void *display_holder = *(void **)((char *)server + 0x58);
     void *display = display_holder;
     MacwsIOMobileFramebufferRef framebuffer = display_holder
-        ? *(MacwsIOMobileFramebufferRef *)((char *)display_holder + 0x300)
+        ? *(MacwsIOMobileFramebufferRef *)((char *)display_holder + g_macws_qc_profile->framebuffer)
         : NULL;
     uint64_t flags = display
-        ? *(const volatile uint64_t *)((const char *)display + 0x9a4)
+        ? *(const volatile uint64_t *)((const char *)display + g_macws_qc_profile->flags)
         : 0;
-    BOOL frame_info_enabled = (flags & 0x800000000ull) != 0;
+    BOOL frame_info_enabled = (flags & g_macws_qc_profile->enabled_mask) != 0;
     if (!frame_info_enabled || !framebuffer)
         return;
 
@@ -17830,7 +18013,11 @@ static void macws_enable_frame_info_tag_list(
     io_connect_t client =
         *(const volatile io_connect_t *)((const char *)framebuffer + 0x14);
     MacwsIOMFBFrameInfoCallback callback =
-        (MacwsIOMFBFrameInfoCallback)(g_macws_quartzcore_header + 0x29209c);
+        (MacwsIOMFBFrameInfoCallback)(g_macws_quartzcore_header + g_macws_qc_profile->callback);
+#if __has_feature(ptrauth_calls)
+    callback = (MacwsIOMFBFrameInfoCallback)ptrauth_sign_unauthenticated(
+        (void *)callback, ptrauth_key_function_pointer, 0);
+#endif
     unsigned registration_slot = 0;
     pthread_mutex_lock(&g_macws_iomfb_frame_lock);
     for (; registration_slot < g_macws_iomfb_frame_reg_count;
@@ -17856,7 +18043,8 @@ static void macws_enable_frame_info_tag_list(
                 last_presentation_time};
     }
     pthread_mutex_unlock(&g_macws_iomfb_frame_lock);
-    if (macws_runtime_diagnostics_enabled()) {
+    if (macws_runtime_diagnostics_enabled() &&
+        g_macws_qc_profile == &macws_qc_ventura) {
         fprintf(stderr,
             "#### IOMFB CANCEL-COMPLETION observed enabled registration "
             "fb=%p client=%u callback=%p context=%p flags=%#llx slot=%u "
@@ -17878,20 +18066,12 @@ static void macws_install_quartzcore_frame_info_hook(
     //   __TEXT vmaddr                                  0x1879be000
     //   IOMFBServer::enable_frame_info_tag_list        0x187c5085c
     //   IOMFBServer::frame_info_callback               0x187c5009c
-    static const uint8_t expected_uuid[16] = {
-        0xcf, 0x85, 0x3b, 0xbd, 0x01, 0xb6, 0x3f, 0x46,
-        0xad, 0xa1, 0xec, 0x70, 0xfd, 0x2d, 0xc9, 0xdc,
-    };
     static const uint32_t expected_prologue[4] = {
         0xd503237f, // pacibsp
         0xd10243ff, // sub sp, sp, #0x90
         0xa9036ffc, // stp x28, x27, [sp, #0x30]
         0xa90467fa, // stp x26, x25, [sp, #0x40]
     };
-    enum {
-        kQuartzCoreEnableFrameInfoTagListOffset = 0x29285c,
-    };
-
     static _Atomic int installed = 0;
     if (atomic_exchange(&installed, 1))
         return;
@@ -17902,33 +18082,18 @@ static void macws_install_quartzcore_frame_info_hook(
         atomic_store(&installed, 0);
         return;
     }
-    const uint8_t *command_bytes = (const uint8_t *)(header + 1);
-    BOOL uuid_matches = NO;
-    for (uint32_t i = 0; i < header->ncmds; i++) {
-        const struct load_command *command =
-            (const struct load_command *)command_bytes;
-        if (command->cmd == LC_UUID &&
-            command->cmdsize >= sizeof(struct uuid_command)) {
-            const struct uuid_command *uuid =
-                (const struct uuid_command *)command;
-            uuid_matches = memcmp(uuid->uuid, expected_uuid,
-                                  sizeof(expected_uuid)) == 0;
-            break;
-        }
-        if (command->cmdsize < sizeof(*command))
-            break;
-        command_bytes += command->cmdsize;
-    }
-    if (!uuid_matches) {
-        fprintf(stderr,
-            "#### IOMFB CANCEL-COMPLETION QuartzCore observer skipped: "
-            "UUID mismatch\n");
+    const struct macws_quartzcore_display_profile *profile = NULL;
+    if (macws_macho_uuid_matches(header, macws_qc_sonoma.uuid))
+        profile = &macws_qc_sonoma;
+    else if (macws_macho_uuid_matches(header, macws_qc_ventura.uuid))
+        profile = &macws_qc_ventura;
+    if (!profile) {
         atomic_store(&installed, 0);
         return;
     }
 
     void *target = (void *)((uintptr_t)header +
-        kQuartzCoreEnableFrameInfoTagListOffset);
+        profile->enable_tags);
     if (memcmp(target, expected_prologue, sizeof(expected_prologue)) != 0) {
         const uint32_t *actual = (const uint32_t *)target;
         fprintf(stderr,
@@ -17939,6 +18104,17 @@ static void macws_install_quartzcore_frame_info_hook(
         return;
     }
 
+    if (profile == &macws_qc_sonoma) {
+        static const uint32_t callback_prologue[] = {
+            0xd503237f, 0xd106c3ff, 0x6d1423e9, 0xa9156ffc,
+        };
+        if (memcmp((const void *)((uintptr_t)header + profile->callback),
+                   callback_prologue, sizeof(callback_prologue)) != 0) {
+            atomic_store(&installed, 0);
+            return;
+        }
+    }
+    g_macws_qc_profile = profile;
     g_macws_quartzcore_header = (uintptr_t)header;
     MSHookFunction(target, (void *)macws_enable_frame_info_tag_list,
         (void **)&g_macws_orig_enable_frame_info_tag_list);
@@ -17946,7 +18122,7 @@ static void macws_install_quartzcore_frame_info_hook(
         "#### IOMFB CANCEL-COMPLETION QuartzCore observer "
         "enable-tag-list=%p trampoline=%p callback=%p\n",
         target, g_macws_orig_enable_frame_info_tag_list,
-        (void *)(g_macws_quartzcore_header + 0x29209c));
+        (void *)(g_macws_quartzcore_header + profile->callback));
 }
 
 // Keep virtual-display pacing outside QuartzCore's display-server locks.
@@ -18019,10 +18195,6 @@ static uintptr_t macws_iomfbserver_finish_skylight_update(
 
 static void macws_install_quartzcore_coexist_pacing_hooks(
     const struct mach_header *untyped_header) {
-    static const uint8_t expected_uuid[16] = {
-        0xcf, 0x85, 0x3b, 0xbd, 0x01, 0xb6, 0x3f, 0x46,
-        0xad, 0xa1, 0xec, 0x70, 0xfd, 0x2d, 0xc9, 0xdc,
-    };
     static const uint32_t expected_finish_prologue[4] = {
         0xd503237f, // pacibsp
         0xa9be4ff4, // stp x20, x19, [sp, #-0x20]!
@@ -18035,25 +18207,20 @@ static void macws_install_quartzcore_coexist_pacing_hooks(
         0xa9017bfd, // stp x29, x30, [sp, #0x10]
         0x910043fd, // add x29, sp, #0x10
     };
-    enum {
-        kQuartzCoreIOMFBServerFinishSkylightUpdateOffset = 0x291220,
-        kQuartzCoreIOMFBServerBeginSkylightUpdateOffset = 0x291288,
-    };
-
     static _Atomic int installed;
     if (atomic_exchange_explicit(&installed, 1, memory_order_acq_rel)) return;
     const struct mach_header_64 *header =
         (const struct mach_header_64 *)untyped_header;
     if (!header || header->magic != MH_MAGIC_64 ||
-        !macws_macho_uuid_matches(header, expected_uuid)) {
+        !macws_macho_uuid_matches(header, g_macws_qc_profile->uuid)) {
         atomic_store_explicit(&installed, 0, memory_order_release);
         return;
     }
 
     void *finish_target = (void *)((uintptr_t)header +
-        kQuartzCoreIOMFBServerFinishSkylightUpdateOffset);
+        g_macws_qc_profile->finish_update);
     void *begin_target = (void *)((uintptr_t)header +
-        kQuartzCoreIOMFBServerBeginSkylightUpdateOffset);
+        g_macws_qc_profile->begin_update);
     // Validate both endpoints before modifying either one. A partial install
     // would pace before begin and then pace again inside SwapEnd.
     if (memcmp(finish_target, expected_finish_prologue,
@@ -18173,9 +18340,9 @@ static void macws_iomfb_complete_cancelled_swap(
         void *display_holder = diagnostics && registration.context
             ? *(void **)((char *)registration.context + 0x58) : NULL;
         uintptr_t pending_begin_before = display_holder
-            ? *(const volatile uintptr_t *)((char *)display_holder + 0x510) : 0;
+            ? *(const volatile uintptr_t *)((char *)display_holder + g_macws_qc_profile->pending_begin) : 0;
         uintptr_t pending_end_before = display_holder
-            ? *(const volatile uintptr_t *)((char *)display_holder + 0x518) : 0;
+            ? *(const volatile uintptr_t *)((char *)display_holder + g_macws_qc_profile->pending_end) : 0;
         size_t pending_before = pending_end_before >= pending_begin_before
             ? (pending_end_before - pending_begin_before) / sizeof(void *) : 0;
         NSDictionary *cancelInfo = @{
@@ -18189,9 +18356,9 @@ static void macws_iomfb_complete_cancelled_swap(
         registration.callback(registration.framebuffer, swap_id,
             (__bridge CFDictionaryRef)cancelInfo, registration.context);
         uintptr_t pending_begin_after = display_holder
-            ? *(const volatile uintptr_t *)((char *)display_holder + 0x510) : 0;
+            ? *(const volatile uintptr_t *)((char *)display_holder + g_macws_qc_profile->pending_begin) : 0;
         uintptr_t pending_end_after = display_holder
-            ? *(const volatile uintptr_t *)((char *)display_holder + 0x518) : 0;
+            ? *(const volatile uintptr_t *)((char *)display_holder + g_macws_qc_profile->pending_end) : 0;
         size_t pending_after = pending_end_after >= pending_begin_after
             ? (pending_end_after - pending_begin_after) / sizeof(void *) : 0;
         static _Atomic unsigned long delivered_count = 0;
@@ -18219,10 +18386,9 @@ static void macws_iomfb_complete_cancelled_swap(
         if (diagnostics) {
             fprintf(stderr,
                 "#### IOMFB GPU-FENCE unavailable swapID=%u "
-                "commandBuffer=%p; delivering no-work cancellation\n",
+                "commandBuffer=%p; completion withheld\n",
                 swap_id, submitted_command_buffer_witness);
         }
-        dispatch_async(dispatch_get_main_queue(), deliver);
         return;
     }
 
@@ -22234,11 +22400,78 @@ bool MacWSAGXNoCopyABIReady(const void *agx_initializer,
         strcmp(build, "20D67") == 0;
 }
 
+enum {
+    MACWS_AGX_KERNEL_BUILD_UNKNOWN = 0,
+    MACWS_AGX_KERNEL_BUILD_20D67 = 1,
+    MACWS_AGX_KERNEL_BUILD_21A329 = 2,
+    MACWS_AGX_KERNEL_BUILD_OTHER = 3,
+};
+
+static int macws_agx_kernel_build(void) {
+    static _Atomic int cached_build = MACWS_AGX_KERNEL_BUILD_UNKNOWN;
+    int cached = atomic_load_explicit(&cached_build, memory_order_acquire);
+    if (cached != MACWS_AGX_KERNEL_BUILD_UNKNOWN) return cached;
+
+    char build[32] = {0};
+    size_t build_size = sizeof(build);
+    int observed = MACWS_AGX_KERNEL_BUILD_OTHER;
+    int sysctl_result = macws_real_sysctlbyname(
+        "kern.osversion", build, &build_size, NULL, 0);
+    int sysctl_errno = errno;
+    if (sysctl_result == 0 && build_size > 0 && build_size <= sizeof(build)) {
+        if (build_size >= 5 && memcmp(build, "20D67", 5) == 0)
+            observed = MACWS_AGX_KERNEL_BUILD_20D67;
+        else if (build_size >= 6 && memcmp(build, "21A329", 6) == 0)
+            observed = MACWS_AGX_KERNEL_BUILD_21A329;
+    }
+    static _Atomic bool did_log = false;
+    bool expected_log = false;
+    if (macws_runtime_diagnostics_enabled() &&
+        atomic_compare_exchange_strong_explicit(&did_log, &expected_log, true,
+            memory_order_acq_rel, memory_order_acquire)) {
+        fprintf(stderr,
+            "#### MACWS_AGX_KERNEL_BUILD result=%d errno=%d len=%zu "
+            "class=%d bytes=",
+            sysctl_result, sysctl_errno, build_size, observed);
+        for (size_t i = 0; i < build_size && i < sizeof(build); i++)
+            fprintf(stderr, "%02x", (unsigned char)build[i]);
+        fprintf(stderr, " text=%.31s\n", build);
+    }
+    int expected = MACWS_AGX_KERNEL_BUILD_UNKNOWN;
+    atomic_compare_exchange_strong_explicit(&cached_build, &expected, observed,
+        memory_order_release, memory_order_acquire);
+    return atomic_load_explicit(&cached_build, memory_order_acquire);
+}
+
 IOReturn IOConnectCallMethod_new(io_connect_t client, uint32_t selector, const uint64_t *in, uint32_t inCnt, const void *inStruct, size_t inStructCnt, uint64_t *out, uint32_t *outCnt, void *outStruct, size_t *outStructCnt) {
     uint32_t orig = selector;
     int skip = caller_is_libmachook(__builtin_return_address(0));
     if (!skip) selector = IOConnectTranslateSelector(client, selector);
-    if(IOConnectIsIOGPU(client) && selector == 0x100 && outStructCnt && *outStructCnt == 0x78) *outStructCnt = 0x70;
+    if (inStruct && IOConnectIsIOGPU(client) && selector == 9 &&
+        inStructCnt == 104 &&
+        macws_agx_kernel_build() == MACWS_AGX_KERNEL_BUILD_21A329) {
+        for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+            const char *name = _dyld_get_image_name(i);
+            if (!name || !strstr(name, "/IOGPU.framework/")) continue;
+            const struct mach_header_64 *image =
+                (const struct mach_header_64 *)_dyld_get_image_header(i);
+            if (macws_macho_uuid_matches(image, MacWSSonomaIOGPUUUID) &&
+                MacWSSonomaResourceABIReady(MacWSSonomaIOGPUUUID,
+                    "21A329", selector, inStructCnt)) {
+                // Runtime-confirmed: the Ventura parent-field rewrite turns
+                // this valid Sonoma request into NoBandwidth. Preserve the
+                // real native wire arguments and return its unmodified result.
+                return IOConnectCallMethod(client, selector, in, inCnt,
+                    inStruct, inStructCnt, out, outCnt, outStruct, outStructCnt);
+            }
+            break;
+        }
+    }
+    if(IOConnectIsIOGPU(client) && selector == 0x100 && outStructCnt &&
+       *outStructCnt == 0x78 &&
+        macws_agx_kernel_build() == MACWS_AGX_KERNEL_BUILD_20D67) {
+        *outStructCnt = 0x70;
+    }
     // sel=0x9 (ResCreate): WAS bumping outStructCnt 0x50 → 0x10000 here based
     // on a misread of `IOGPUDevice::new_resource <+76>`. Standalone iOS-native
     // test (misc/agx_iogpu_probe.c + misc/sel9_test_macos.c) proves the OPPOSITE:
@@ -22353,7 +22586,8 @@ IOReturn IOConnectCallMethod_new(io_connect_t client, uint32_t selector, const u
             ? *(const uint32_t *)(src + 0x48) : 0;
         int patched = 0;
         memcpy(shadowbuf, inStruct, inStructCnt);
-        if(bc == 0 && agxType == 0) {
+        if(bc == 0 && agxType == 0 &&
+           macws_agx_kernel_build() != MACWS_AGX_KERNEL_BUILD_21A329) {
             // Heap byte-count fixup (only valid for type=0 heap creation;
             // type=0x80 client-buffer path uses args+0x40 as the end VA,
             // not a size). Prefer the exact length captured at the upstream
@@ -22418,6 +22652,22 @@ IOReturn IOConnectCallMethod_new(io_connect_t client, uint32_t selector, const u
                     "+0x48 span=%#llx +0x58 low32=%#x -> +0x40=%#llx\n",
                     resDiagSequence, (unsigned long long)mac_span, sz32,
                     (unsigned long long)nb);
+            }
+        } else if (bc == 0 && agxType == 0) {
+            // Runtime-confirmed on iOS 17.0 build 21A329: the raw 0x68-byte
+            // request already uses the kernel's native layout (+0x48 size,
+            // +0x58 arena). Replaying those exact bytes succeeds; applying
+            // the iOS 16.3 translation above moves both fields and returns
+            // kIOReturnNoResources. Preserve the request and retain its span
+            // for the existing client-ID/resource map.
+            agxHeapSz = va48;
+            if (resDiagActive && resDiagSequence <= 64) {
+                fprintf(stderr,
+                    "#### AGX_RES_DIAG #%u iOS 17 native type0 layout kept: "
+                    "+0x48 span=%#llx +0x58 arena=%#llx\n",
+                    resDiagSequence,
+                    (unsigned long long)va48,
+                    (unsigned long long)*(const uint64_t *)(src + 0x58));
             }
         }
         // type=0 with args+0x40 already set (high bit pattern = pinned-VA
@@ -22752,7 +23002,8 @@ IOReturn IOConnectCallMethod_new(io_connect_t client, uint32_t selector, const u
         // iOS sends at +0x58.  Therefore +0x58 must be reconstructed from the
         // current IOSurface's properties, not blindly zeroed.  Presence of
         // that span also supplies native layout-word bit 33.
-        if(agxType == 0x82) {
+        if (agxType == 0x82 &&
+            macws_agx_kernel_build() != MACWS_AGX_KERNEL_BUILD_21A329) {
             uint32_t f14 = *(const uint32_t *)(src + 0x14);
             uint64_t old_40 = *(const uint64_t *)(src + 0x40);
             uint64_t old_50 = *(const uint64_t *)(src + 0x50);
@@ -22813,6 +23064,11 @@ IOReturn IOConnectCallMethod_new(io_connect_t client, uint32_t selector, const u
                     (unsigned long long)old_58,
                     (unsigned long long)*(const uint64_t *)(shadowbuf + 0x58));
             }
+        } else if (agxType == 0x82 && resDiagActive &&
+                   resDiagSequence <= 64) {
+            fprintf(stderr,
+                "#### AGX_RES_DIAG #%u iOS 17 type0x82 layout kept raw\n",
+                resDiagSequence);
         }
         if(patched) inStruct = shadowbuf;
         if (resDiagActive && resDiagSequence <= 64) {
@@ -23672,7 +23928,7 @@ static IOReturn MacwsIOMobileFramebufferSwapEnd_new(void *framebuffer) {
     }
 
     uint32_t swap_id = *(const volatile uint32_t *)
-        ((const char *)framebuffer + 0x68);
+        ((const char *)framebuffer + g_macws_iomfb_profile->swap_id);
     uint64_t requested_presentation_time = mach_absolute_time();
     IOReturn result = IOMobileFramebufferSwapCancel(framebuffer, swap_id);
     static _Atomic unsigned long cancel_count = 0;
@@ -23742,8 +23998,8 @@ IOReturn IOConnectCallStructMethod_new(io_connect_t client, uint32_t selector, c
         macws_real_swapend_diagnostic_enabled();
     if (!struct_skip && !realSwapEndDiagnostic &&
         atomic_load(&g_macws_iomfb_coexist_swap_cancel) &&
-        orig == 5 && selector == 5 && inStruct && inStructCnt == 0x46c) {
-        uint32_t swap_id = *(const volatile uint32_t *)((const char *)inStruct + 0x50);
+        orig == 5 && selector == 5 && inStruct && inStructCnt == g_macws_iomfb_profile->swap_struct_size) {
+        uint32_t swap_id = *(const volatile uint32_t *)((const char *)inStruct + g_macws_iomfb_profile->swap_id - 0x18);
         uint64_t scalar = swap_id;
         uint64_t requested_presentation_time = mach_absolute_time();
         IOReturn cancel_r = IOConnectCallScalarMethod(
@@ -23793,16 +24049,39 @@ IOReturn IOConnectCallStructMethod_new(io_connect_t client, uint32_t selector, c
 
         return cancel_r;
     }
-    // AGX GPU device-info query (method 256 / setupImmediate): macOS 13.4 asks for
-    // a 0x78 (120-byte) output struct, but the iOS 16.x GPU userclient hard-checks
-    // the output size at 0x70 (112). The 8-byte mismatch -> kIOReturnBadArgument and
-    // AGX device init aborts. Clamp to what the iOS kernel accepts. (Found by diffing
-    // macOS AGXMetal13_3 727C250E vs iOS BA327004 in Ghidra: both selector 0x100,
-    // outStructCnt 0x78 vs 0x70.)
-    if(IOConnectIsIOGPU(client) && selector == 0x100 && outStructCnt && *outStructCnt == 0x78) {
+    // AGX GPU device-info query (selector 0x100 / setupImmediate): the 0x78→0x70
+    // compatibility adjustment is specific to iOS build 20D67. On iOS 17, runtime
+    // evidence shows that keeping the macOS 13.4 request at 0x78 succeeds; clamping
+    // it to 0x70 returns kIOReturnBadArgument. Do not generalize the older ABI to
+    // newer kernels.
+    size_t agx_info_requested_out =
+        (IOConnectIsIOGPU(client) && selector == 0x100 && outStructCnt)
+            ? *outStructCnt : 0;
+    static _Atomic unsigned agx_info_sequence = 0;
+    unsigned agx_info_n = (agx_info_requested_out &&
+        macws_runtime_diagnostics_enabled())
+        ? atomic_fetch_add(&agx_info_sequence, 1) + 1 : 0;
+    if (agx_info_n && agx_info_n <= 4) {
+        fprintf(stderr,
+            "#### AGXIOC setupImmediate #%u before conn=%u sel=%#x "
+            "inSC=%zu outSC=%zu bytes=",
+            agx_info_n, client, selector, inStructCnt,
+            agx_info_requested_out);
+        const uint8_t *bytes = (const uint8_t *)inStruct;
+        for (size_t i = 0; bytes && i < inStructCnt && i < 32; i++)
+            fprintf(stderr, "%02x", bytes[i]);
+        fprintf(stderr, "\n");
+    }
+    if(IOConnectIsIOGPU(client) && selector == 0x100 && outStructCnt &&
+       *outStructCnt == 0x78 &&
+       macws_agx_kernel_build() == MACWS_AGX_KERNEL_BUILD_20D67) {
         *outStructCnt = 0x70;
     }
     IOReturn r = IOConnectCallStructMethod(client, selector, inStruct, inStructCnt, outStruct, outStructCnt);
+    if (agx_info_n && agx_info_n <= 4)
+        fprintf(stderr,
+            "#### AGXIOC setupImmediate #%u after outSC=%zu result=%#x\n",
+            agx_info_n, outStructCnt ? *outStructCnt : 0, r);
     // Read-only witness for the exclusive-mode control experiment.  The exact
     // 0x46c-byte shape is the macOS 13.4 kern_SwapEnd call verified above;
     // coexistence returns from the narrow SwapCancel branch before reaching

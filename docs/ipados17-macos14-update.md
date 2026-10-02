@@ -1,0 +1,91 @@
+# iPadOS 17.0 + macOS 14.0 适配说明
+
+更新日期：2026-10-02。分支：`codex/ipados17-sonoma14`。
+
+**基础桌面已经跑通，上游提到的功能尚未全部验证。** 本分支记录现有设备上的适配和回归结果，不代表任意 iOS 17 设备都能直接安装成功。
+
+## 验证环境
+
+| 项目 | 实际环境 |
+| --- | --- |
+| 设备 | M1 iPad Pro，iPad13,4 |
+| iPadOS | 17.0，21A329 |
+| macOS rootfs | Sonoma 14.0，23A344，设备路径 `/var/mnt/rootfs` |
+| 越狱环境 | Dopamine 3.0.10；已从早期 RootHide Bootstrap 环境迁移 |
+| 渲染 | iOS 原生 AGX GPU 路径，Host 最终画面呈现 |
+| 基础代码 | DCMMC/macPad，本地适配起点 `0106674` |
+
+版本来自实际设备的 SystemVersion.plist；设备、渲染及服务结果见[调查记录](ipados17-startup-investigation.md)。RootHide Bootstrap 单独使用的启动能力没有通过验证。其他系统小版本、其他越狱构建及其他设备仍需重新核对二进制。
+
+## GitHub 功能覆盖情况
+
+“已验证”仅指下列具体操作；“待验证”表示本次没有足够证据，不等于该功能一定不工作。上游 README 的演示、性能分数和其他设备结果不能直接算作本环境的结果。
+
+| 功能 | 本环境状态 | 验证范围或剩余问题 |
+| --- | --- | --- |
+| macOS chroot 命令行 | 已验证 | 实际 echo 输出、退出码 0 |
+| 全屏桌面、菜单栏、Dock、Finder 桌面 | 已验证 | Host 实际画面；Finder 文件操作未全面验证 |
+| 原生 AGX GPU 和最终画面呈现 | 已验证 | 实际 GPU 工作完成和可见像素；尚无“不损失性能”的基准证据 |
+| Launchpad 文件夹和背景模糊 | 已验证 | 修复打开文件夹的崩溃；连续关闭/打开 12 次，真实图标和模糊可见 |
+| Terminal、键盘和指针 | 部分验证 | `whoami` 实际返回 root；原生菜单新建第二个窗口；指针切换焦点。冷启动曾出现 `Login incorrect`，仍需修复和回归 |
+| 系统设置及系统应用 | 部分验证 | 曾观察到 ViewBridge endpoint 无效，部分面板没有形成可见窗口；不能宣称完整可用 |
+| 每个应用独立 iOS 窗口、Stage Manager、自动调整尺寸 | 待验证 | 最终合成画面成功不等于独立窗口协议全部成立 |
+| 应用直接 drawable 加速 | 未确认 | Host 的 authority capability/controller identity 仍为 NO；不能以最终画面替代此项验证 |
+| 滚动、选择、拖动/调整窗口、右键、缩放/旋转 | 待完整验证 | 基础点击和焦点已有证据，多指手势及完整组合尚未逐项回归 |
+| Mission Control、桌面切换、App Exposé、触屏触控板 | 待验证 | 未完成本环境功能回归 |
+| Magic Keyboard、虚拟键盘、快捷键工具栏、中文输入法 | 待完整验证 | 已验证基础硬件键盘输入；其他输入方式和中文组合输入尚未验证 |
+| 剪贴板、文件共享、拖放、导入导出、打开/保存面板 | 待验证 | 服务端点就绪不能证明用户操作全部成功 |
+| 显示密度、Retina、80–120 Hz、自适应帧率 | 待验证 | 没有本环境完整显示档位和帧率测量 |
+| 硬件视频编解码、音频、定位 | 待验证 | 未完成本环境端到端验证 |
+| Wi-Fi、蓝牙、Apple Pencil、屏幕镜像 | 待验证 | 能通过 SSH 联网不能作为这些 macOS 功能的验证 |
+| VS Code/Electron、浏览器、Steam、Office、游戏 | 待验证 | 不沿用上游其他设备的运行结果 |
+| VNC、锁屏/睡眠及恢复 | 待验证 | 当前桌面验证使用 Host 实际画面；VNC 不作为启动成功的必要条件 |
+| 长时间稳定运行、冷启动、全新安装 | 尚未完成 | 当前为已经配置的单台设备上的验证 |
+
+上游功能列表：[macPad](https://github.com/DCMMC/macPad)。文件系统准备背景：[MacWSBootingGuide](https://github.com/DCMMC/MacWSBootingGuide)。
+
+## 本分支的适配内容
+
+1. **安装和 shared cache 准备**：检查缓存属主、路径与签名边界，补全安装目录、签名和启动 trustcache；检查旧 `/var/jb/usr` bind mount 视图。
+2. **Sonoma 显示和 GPU ABI**：增加精确版本的 display/resource profiles，适配 IOMobileFramebuffer、SkyLight 提交和 AGX 资源调用。依据实际二进制和日志，不把旧版本偏移直接套用到新版本。
+3. **Metal shader 闭包**：为 23A344 + 21A329 准备对应 shader companions 和清单；校验原始源码 SHA256 及完整转换结果。版本不匹配时拒绝自动套用。
+4. **应用和服务启动**：补充 LaunchServices payload、IconServices/CoreServices 桥接、OpenDirectory/accountpolicy 启动，以及 Dopamine fork 后的页面权限修复。
+5. **Launchpad 文件夹崩溃**：修复兼容纹理引入 IOSurface 后的所有权缺口。仅在精确 SkyLight UUID 和调用地址匹配时，向 `WS::Surface` 转移独立 retain；原有析构释放和缓存淘汰继续执行。
+
+第 5 项 RE-confirmed：实际 23A344 SkyLight UUID 为 `42FD2E33-2BB2-372F-A01F-B2B36C8277B9`，plain-texture 调用返回地址为 image + `0x5baac`；析构中的 CFRelease 位于 + `0x5b254`。runtime-confirmed：所有权跟踪显示旧路径的释放顺序耗尽了 pool 所持引用。具体证据及修复边界见调查记录的 “Sonoma Launchpad folder” 一节。
+
+## 验证结果
+
+- `test_sonoma*.py`：8 项通过。
+- SkyLight 所有权边界测试：1 项通过。
+- 启动 trust、恢复、shader 转换、账户服务、会话、CoreServices、fork、LaunchServices、shared cache 和 VNC surface 合约相关测试：72 项通过。
+- Launchpad 修复的 libmachook 两个架构均编译并部署；运行时连续 12 次文件夹开关后 WindowServer 和 Dock 未退出，实际画面显示内容和背景模糊。
+
+这些测试覆盖指定适配边界，不能替代全部应用功能或长期稳定性测试。运行证据保存在本地 `tmp/sonoma-14.0/`，该目录不随 Git 发布；调查记录保留了证据文件名、二进制 UUID 和地址。
+
+## 使用边界与已有设备操作
+
+需要自行准备合法获取的完整 macOS 14.0 rootfs 和所需 Apple 框架资源。Git 仓库只包含适配源码、准备脚本及测试，不包含 IPSW、系统镜像、设备数据或私钥。当前设备上验证成功的准备流程包含文件系统侧操作，尚未完成一台全新设备的一键安装回归。
+
+下面命令在**已安装本分支、完成 rootfs 准备的设备**上执行；以 root shell 为例：
+
+```sh
+# 查看 GUI 服务状态
+bash /var/jb/usr/macOS/bin/macos_gui.sh status
+
+# 启动共存模式，再通过 macPad Host 查看桌面
+bash /var/jb/usr/macOS/bin/macos_gui.sh start coexist
+
+# 验证 chroot CLI
+bash /var/jb/usr/macOS/bin/run_bash.sh -c \
+  'export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; echo macws-cli-ok'
+
+# 停止 GUI
+bash /var/jb/usr/macOS/bin/macos_gui.sh stop
+```
+
+完整构建背景见主 README 和项目说明。不要直接使用旧脚本中的示例 IP；先配置自己的 SSH 连接。不要在运行中的 rootfs 内直接递归删除文件；必须先检查并卸载嵌套挂载。
+
+## 下一步
+
+优先解决 Terminal 冷启动和系统设置面板问题，再逐项回归输入、窗口、文件共享及应用。每项功能需有真实操作结果；进程存活、跳过断言或服务返回成功都不能单独作为完成证据。

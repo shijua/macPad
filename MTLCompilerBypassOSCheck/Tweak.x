@@ -19,6 +19,10 @@
 // The rootless iOS 16 Theos SDK used by this project omits xpc/xpc.h.  This
 // is the exact public C ABI needed by the UUID-locked reply observer.
 extern void *xpc_data_create(const void *bytes, size_t length);
+extern void xpc_dictionary_set_uint64(void *dictionary, const char *key,
+                                       uint64_t value);
+extern void xpc_dictionary_set_string(void *dictionary, const char *key,
+                                       const char *value);
 
 // Diagnostics are explicitly opt-in for the current boot.  They must never
 // survive as configuration under a persistent mobile or rootless directory.
@@ -813,6 +817,28 @@ static void *MacWSCompilerReplyDataCreate(const void *bytes, size_t length) {
     return xpc_data_create(bytes, length);
 }
 
+// iOS 17's reply callback writes the error branch without calling
+// xpc_data_create. These wrappers preserve the exact XPC writes and record
+// only the UUID-validated, diagnostic call sites installed below.
+static void MacWSCompilerReplySetError(void *dictionary, const char *key,
+                                      uint64_t value) {
+    if (key && strcmp(key, "error") == 0)
+        MTLPatchLog("compiler error reply request=%u discriminator=%#lx code=%llu",
+                    gReplyRequestSequence,
+                    (unsigned long)gReplyRequestDiscriminator,
+                    (unsigned long long)value);
+    xpc_dictionary_set_uint64(dictionary, key, value);
+}
+
+static void MacWSCompilerReplySetErrorMessage(void *dictionary,
+                                              const char *key,
+                                              const char *value) {
+    if (key && strcmp(key, "errorMessage") == 0)
+        MTLPatchLog("compiler error message request=%u text=%s",
+                    gReplyRequestSequence, value ? value : "(null)");
+    xpc_dictionary_set_string(dictionary, key, value);
+}
+
 static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
     uintptr_t a0, uintptr_t a1, uintptr_t a2,
     void *request, size_t requestSize, void *a5) {
@@ -1031,8 +1057,8 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
 
 static void InstallMacOSMetalTargetAdapter(void) {
     // RE-confirmed from the complete executables, not inferred from the OS
-    // version.  Both images have the same three authenticated build-call
-    // sites and the same reply call:
+    // version.  The first two images have the same three authenticated
+    // build-call sites and the same reply call:
     //
     //   iOS 16.3.1 (20D67) UUID 6D2CFE56-8D88-39AA-BC25-7FFE5058ED4E
     //   iOS 16.0   (20A8372) UUID B4745394-88D0-3739-9E17-4DE2FB12B00E
@@ -1041,6 +1067,12 @@ static void InstallMacOSMetalTargetAdapter(void) {
     // 2f980bfb46e3d97c5a330f54c158b41de21793ec113f3d33891e3599e75faba5;
     // otool disassembly confirms +0x20e8 is `blraaz x9`, +0x25f0 and
     // +0x2628 are `blraaz x8`, and +0x2770 is the same xpc_data_create BL.
+    // iOS 17.0 (21A329) UUID EBA8ED6F-9C82-3F0E-99F2-319A21BB6877,
+    // SHA-256 362775c6a32f4cc3194e2d14820d7b5d081f439c905ba58f2f37666a4289deeb:
+    // otool shows the request vtable call at +0x236c/+0x23a4 (both
+    // `blraaz x8`) and the reply's _xpc_data_create call at +0x24ec.
+    // Its +0x21a8 call loads a different vtable slot (+0x20) to load the
+    // compiler plugin, so it must not use the build-request wrapper.
     // Keep an exact UUID allowlist in addition to the per-instruction checks
     // below so an unexamined service build always retains stock behavior.
     static const uint8_t expectedUUIDs[][16] = {
@@ -1051,6 +1083,10 @@ static void InstallMacOSMetalTargetAdapter(void) {
         {
             0xb4, 0x74, 0x53, 0x94, 0x88, 0xd0, 0x37, 0x39,
             0x9e, 0x17, 0x4d, 0xe2, 0xfb, 0x12, 0xb0, 0x0e,
+        },
+        {
+            0xeb, 0xa8, 0xed, 0x6f, 0x9c, 0x82, 0x3f, 0x0e,
+            0x99, 0xf2, 0x31, 0x9a, 0x21, 0xbb, 0x68, 0x77,
         },
     };
     const struct mach_header_64 *mh = NULL;
@@ -1071,6 +1107,7 @@ static void InstallMacOSMetalTargetAdapter(void) {
     const struct load_command *lc =
         (const struct load_command *)((const uint8_t *)mh + sizeof(*mh));
     bool uuidMatches = false;
+    bool ios17Service = false;
     uint8_t actualUUID[16] = {0};
     for (uint32_t i = 0; i < mh->ncmds; i++) {
         if (lc->cmd == LC_UUID) {
@@ -1082,6 +1119,7 @@ static void InstallMacOSMetalTargetAdapter(void) {
                 if (memcmp(actualUUID, expectedUUIDs[candidate],
                            sizeof(actualUUID)) == 0) {
                     uuidMatches = true;
+                    ios17Service = candidate == 2;
                     break;
                 }
             }
@@ -1107,11 +1145,20 @@ static void InstallMacOSMetalTargetAdapter(void) {
         uintptr_t offset;
         uint32_t expected;
     };
-    static const struct MacWSTargetAdapterCallSite callSites[] = {
+    static const struct MacWSTargetAdapterCallSite legacyCallSites[] = {
         {0x20e8, 0xd63f093f}, // _compileRequestMain: blraaz x9
         {0x25f0, 0xd63f091f}, // XPC handler, hang timer: blraaz x8
         {0x2628, 0xd63f091f}, // XPC handler, no timer: blraaz x8
     };
+    static const struct MacWSTargetAdapterCallSite ios17CallSites[] = {
+        {0x236c, 0xd63f091f}, // XPC handler, hang timer: blraaz x8
+        {0x23a4, 0xd63f091f}, // XPC handler, no timer: blraaz x8
+    };
+    const struct MacWSTargetAdapterCallSite *callSites =
+        ios17Service ? ios17CallSites : legacyCallSites;
+    size_t callSiteCount = ios17Service
+        ? sizeof(ios17CallSites) / sizeof(ios17CallSites[0])
+        : sizeof(legacyCallSites) / sizeof(legacyCallSites[0]);
     if (!OrigMTLCodeGenServiceBuildRequest) {
         MTLPatchLog("target adapter: symbol unavailable");
         OrigMTLCodeGenServiceBuildRequest = NULL;
@@ -1126,8 +1173,8 @@ static void InstallMacOSMetalTargetAdapter(void) {
         OrigMTLCodeGenServiceBuildRequest = NULL;
         return;
     }
-    uint32_t branches[sizeof(callSites) / sizeof(callSites[0])] = {0};
-    for (size_t i = 0; i < sizeof(callSites) / sizeof(callSites[0]); i++) {
+    uint32_t branches[sizeof(legacyCallSites) / sizeof(legacyCallSites[0])] = {0};
+    for (size_t i = 0; i < callSiteCount; i++) {
         uint32_t *callSite =
             (uint32_t *)((uintptr_t)mh + callSites[i].offset);
         intptr_t delta = (intptr_t)target - (intptr_t)callSite;
@@ -1149,7 +1196,7 @@ static void InstallMacOSMetalTargetAdapter(void) {
         branches[i] = 0x94000000u |
             ((uint32_t)((uint64_t)(delta >> 2) & 0x03ffffffu));
     }
-    for (size_t i = 0; i < sizeof(callSites) / sizeof(callSites[0]); i++) {
+    for (size_t i = 0; i < callSiteCount; i++) {
         uint32_t *callSite =
             (uint32_t *)((uintptr_t)mh + callSites[i].offset);
         PatchInstruction(callSite, branches[i]);
@@ -1162,8 +1209,10 @@ static void InstallMacOSMetalTargetAdapter(void) {
     // Reply dumping is a bounded diagnostic witness, not runtime machinery.
     // Never patch the stock iOS reply path in production.
     if (MacWSCompilerDiagnosticsEnabled()) {
-        uint32_t *replyDataSite = (uint32_t *)((uintptr_t)mh + 0x2770);
-        const uint32_t expectedReplyCall = 0x9400047c; // bl _xpc_data_create stub
+        uint32_t *replyDataSite = (uint32_t *)((uintptr_t)mh +
+            (ios17Service ? 0x24ec : 0x2770));
+        const uint32_t expectedReplyCall = ios17Service
+            ? 0x94000511 : 0x9400047c; // bl _xpc_data_create stub
         uintptr_t replyTarget = StripPAC((const void *)MacWSCompilerReplyDataCreate);
         // Architectural stripping preserves the exact four-byte-aligned
         // entry; never compensate by searching neighboring instructions.
@@ -1185,6 +1234,41 @@ static void InstallMacOSMetalTargetAdapter(void) {
         MTLPatchLog("compiler reply observer installed site=%p old=%#x new=%#x wrapper=%#lx",
                     replyDataSite, expectedReplyCall, *replyDataSite,
                     (unsigned long)replyTarget);
+
+        if (ios17Service) {
+            struct MacWSReplyErrorSite {
+                uintptr_t offset;
+                uint32_t expected;
+                const void *wrapper;
+                const char *label;
+            } errorSites[] = {
+                {0x24b0, 0x94000548,
+                 (const void *)MacWSCompilerReplySetError, "code"},
+                {0x24c8, 0x9400053e,
+                 (const void *)MacWSCompilerReplySetErrorMessage, "message"},
+            };
+            for (size_t i = 0; i < sizeof(errorSites) / sizeof(errorSites[0]);
+                 i++) {
+                uint32_t *site = (uint32_t *)((uintptr_t)mh +
+                    errorSites[i].offset);
+                uintptr_t observer = StripPAC(errorSites[i].wrapper);
+                intptr_t delta = (intptr_t)observer - (intptr_t)site;
+                if (*site != errorSites[i].expected ||
+                    *(const uint32_t *)observer != kPacibsp ||
+                    (delta & 3) != 0 || delta < -(1LL << 27) ||
+                    delta >= (1LL << 27)) {
+                    MTLPatchLog("compiler error observer validation failed %s site=%p insn=%#x target=%#lx",
+                                errorSites[i].label, site, *site,
+                                (unsigned long)observer);
+                    continue;
+                }
+                uint32_t branch = 0x94000000u |
+                    ((uint32_t)((uint64_t)(delta >> 2) & 0x03ffffffu));
+                PatchInstruction(site, branch);
+                MTLPatchLog("compiler error observer installed %s site=%p",
+                            errorSites[i].label, site);
+            }
+        }
     }
 }
 

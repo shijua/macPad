@@ -17,9 +17,27 @@ QC_MANIFEST_TARGET="$METAL2METAL_ROUTE_DIR/quartzcore-default.route.plist"
 METAL2METAL=/var/jb/usr/macOS/bin/metal2metal.py
 QC_LLVM_DIS=/var/jb/usr/lib/llvm-16/bin/llvm-dis
 QC_LLVM_AS=/var/jb/usr/lib/llvm-16/bin/llvm-as
+QC_PROFILE=ventura13-ios19-macabi
+if [ "$(/var/jb/usr/sbin/sysctl -n kern.osversion 2>/dev/null)" = "21A329" ]; then
+	QC_PROFILE=ventura13-ios165-macabi
+fi
 
 qc_compat_sha256() {
 	sha256sum "$1" 2>/dev/null | awk '{print $1}'
+}
+
+qc_manifest_matches_profile() {
+	python3 - "$1" "$2" <<'PY'
+import plistlib
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as manifest_file:
+        manifest = plistlib.load(manifest_file)
+except (OSError, plistlib.InvalidFileException):
+    raise SystemExit(1)
+raise SystemExit(0 if manifest.get("profile") == sys.argv[2] else 1)
+PY
 }
 
 if [ "$(qc_compat_sha256 "$QC_ORIGINAL")" != "$QC_EXPECTED_SHA256" ]; then
@@ -50,7 +68,8 @@ fi
 # byte-level witness for this translator/profile pair. Avoid LLVM work on every
 # package reinstall and cold repair.
 if python3 "$METAL2METAL" verify-runtime-manifest "$QC_MANIFEST_TARGET" \
-	--source "$QC_ORIGINAL" --output "$QC_COMPAT_TARGET" >/dev/null 2>&1; then
+	--source "$QC_ORIGINAL" --output "$QC_COMPAT_TARGET" >/dev/null 2>&1 &&
+	qc_manifest_matches_profile "$QC_MANIFEST_TARGET" "$QC_PROFILE"; then
 	echo '[INFO] complete QuartzCore metal2metal library already installed'
 	exit 0
 fi
@@ -60,6 +79,7 @@ QC_COMPAT_TMP="$QC_COMPAT_TARGET.new.$$"
 QC_MANIFEST_TMP="$QC_MANIFEST_TARGET.new.$$"
 python3 "$METAL2METAL" translate "$QC_ORIGINAL" "$QC_COMPAT_TMP" \
 	--llvm-dis "$QC_LLVM_DIS" --llvm-as "$QC_LLVM_AS" \
+	--profile "$QC_PROFILE" \
 	--auto-lower-known-air \
 	--runtime-manifest "$QC_MANIFEST_TMP" \
 	--runtime-source-path "/System/Library/Frameworks/QuartzCore.framework/Versions/A/Resources/default.metallib" \

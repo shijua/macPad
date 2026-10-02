@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>XPC_SERVICE_NAME</key>
+		<string>com.macwsguide.accountpolicy</string>
+		<key>__CFPREFERENCES_AVOID_DAEMON</key>
+		<string>1</string>
+		<key>__CF_USER_TEXT_ENCODING</key>
+		<string>0x0:0:0</string>
+	</dict>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>com.macwsguide.accountpolicy</string>
+	<key>MachServices</key>
+	<dict>
+		<key>com.macwsguide.od.accountpolicy</key>
+		<true/>
+	</dict>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+		<string>0</string>
+		<string>0</string>
+		<string>/var/mnt/rootfs</string>
+		<string>/System/Library/PrivateFrameworks/AccountPolicy.framework/XPCServices/com.apple.AccountPolicyHelper.xpc/Contents/MacOS/com.apple.AccountPolicyHelper</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/var/jb/var/mobile/accountpolicy.log</string>
+	<key>StandardOutPath</key>
+	<string>/var/jb/var/mobile/accountpolicy.log</string>
+</dict>
+</plist>
