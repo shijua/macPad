@@ -109,11 +109,12 @@ bash /var/jb/usr/macOS/bin/macos_gui.sh stop
 - Dock 配置中指向不存在的 `/Applications/Keynote.app`、`Numbers.app`、`Pages.app` 三项已移除；原始 plist 保存在设备的 `sonoma-workspace-originals/dock-before-missing-iwork-cleanup.plist`。
 - `postinst.sh` 的签名判断已修正：受信任但仍带 Apple CMS 的二进制不会被误判为已完成 MacWS 签名；19 项启动合约测试通过。
 - 设置扩展服务本身已能启动，49 个设置扩展记录可验证。真实启动仍在创建容器时失败：运行日志记录 `com.apple.Appearance-Settings.extension ... (err=2) failed to set container`，UID 501 对照后仍无法发布扩展窗口。这个问题仍未完成，不能把空白右侧面板当作可用设置。
+- 为验证容器边界，已备份并修正 rootfs 内 `/var/mobile`、`Containers`、`Shared`、`AppGroup` 四级目录的属主；修正后错误由 `err=13` 变为 `err=2`，仍无法创建扩展容器。原属主记录与运行日志保存在迁移备份的 `settings-container/` 目录。
 
 - **设置**：`SystemSettings.host.log` 实际记录 `com.apple.view-bridge: Connection invalid`；ThemeWidgetControlViewService 的 listener 请求也无效。`settings-bridge ready=yes` 仅证明桥接能力发布，不能证明设置页面可用。
 - **图标**：`iconservicesagent.log` 记录 `This library format is not supported on this platform (or was built with an old version of the tools)`。THEORY：图标生成失败可能关联问号图标；需捕获具体应用的图标请求和失败回复才能确认。
 - **菜单**：当前 Terminal PID 的生产菜单快照协议请求得到 `socket.timeout: timed out`。该结果不证明所有应用的菜单都失败，也未定位到输入路由或主线程中的具体阻塞点。
-- **网络**：chroot 的真实 echo 仍成功。系统 `/usr/bin/curl` 请求 `https://www.apple.com`，设置 `SSL_CERT_FILE=/etc/ssl/cert.pem` 后仍返回 `curl: (60) SSL certificate problem: Couldn't understand the server certificate format`。没有通过关闭证书验证来宣称网络修复。此结果不能单独解释 Safari 的全部故障。
+- **网络**：chroot 的真实 echo 仍成功。系统 `/usr/bin/curl` 请求 `https://www.apple.com`，设置 `SSL_CERT_FILE=/etc/ssl/cert.pem` 后仍返回 `curl: (60) SSL certificate problem: Couldn't understand the server certificate format`；显式指定两个 PEM bundle 后又得到证书链验证失败。没有通过关闭证书验证来宣称网络修复。此结果不能单独解释 Safari 的全部故障。
 - **其他应用**：Host 日志记录 Maps 未完成 Catalyst 场景启动；Messages 抛出 `returning nil screen from mainScreen is not allowed!`；Notes 也有 ViewBridge listener 无效记录；Activity Monitor 报 AssetCacheManagerService lookup 失败。尚未完成这些应用的所有用户操作。
 - **iCloud**：查阅当前 macPad 和 MacWSBootingGuide README，未找到明确支持声明。没有读取设备账号、登录信息或尝试同步；现有 iPadOS cloud daemon 的存在不能作为 macOS iCloud 验证。
 
