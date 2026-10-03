@@ -11419,11 +11419,27 @@ static bool macws_rosetta_amfi_public_key_hash_compat(
     return true;
 }
 
+static void macws_trace_sandbox_result(const char *entry, const char *policy,
+                                     int operation, int result, int savedErrno) {
+    // Diagnostic only: the actual Sonoma sandbox_apply submits operation
+    // 0/1. Record the rejection without changing the policy or its result.
+    if (policy && !strcmp(policy, "Sandbox") &&
+        (operation == 0 || operation == 1) &&
+        getenv("MACWS_SANDBOX_TRACE")) {
+        fprintf(stderr,
+            "#### SANDBOX-APPLY-DIAG pid=%d entry=%s op=%d result=%d errno=%d\n",
+            getpid(), entry, operation, result, savedErrno);
+    }
+    errno = savedErrno;
+}
+
 int __mac_syscall_new(const char *policy, int operation, void *argument) {
     if (macws_amfi_immovable_task_port_compat(
             "__mac_syscall", policy, operation, argument))
         return 0;
-    return __mac_syscall(policy, operation, argument);
+    int result = __mac_syscall(policy, operation, argument);
+    macws_trace_sandbox_result("__mac_syscall", policy, operation, result, errno);
+    return result;
 }
 
 extern int __sandbox_ms(const char *policy, int operation, void *argument);
@@ -11433,6 +11449,7 @@ int macws_sandbox_ms(const char *policy, int operation, void *argument) {
         return 0;
     int result = __sandbox_ms(policy, operation, argument);
     int savedErrno = errno;
+    macws_trace_sandbox_result("__sandbox_ms", policy, operation, result, savedErrno);
     if (macws_rosetta_amfi_public_key_hash_compat(
             policy, operation, argument, result, savedErrno))
         return 0;
