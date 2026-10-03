@@ -12,6 +12,7 @@ TRAMPOLINES="$ROOTFS/usr/lib/libobjc-trampolines.dylib"
 MACHO_PATCHER=/var/jb/usr/macOS/bin/set_macos_version.py
 LOAD_PATCHER=/var/jb/usr/macOS/bin/add_macho_load_dylib.py
 SETTINGS_ENT=/var/jb/usr/macOS/bin/settings-extension-entitlements.plist
+EXEC_ALIAS=/var/jb/usr/macOS/bin/macws_chroot_exec_alias.py
 LDID=/var/jb/usr/bin/ldid
 JBCTL=/var/jb/usr/bin/jbctl
 OTOOL=/var/jb/usr/bin/otool
@@ -34,12 +35,15 @@ if [ ! -d "$EXTENSIONS_ROOT" ]; then
     exit 0
 fi
 for required in "$LIBMACHOOK" "$SUBSTRATE" "$TRAMPOLINES" \
-                "$MACHO_PATCHER" "$LOAD_PATCHER" "$SETTINGS_ENT"; do
+                "$MACHO_PATCHER" "$LOAD_PATCHER" "$SETTINGS_ENT" "$EXEC_ALIAS"; do
     if [ ! -f "$required" ]; then
         echo "[ERROR] Settings extension runtime prerequisite missing: $required" >&2
         exit 1
     fi
 done
+# Sandbox resolves the outer executable path after the carrier enters chroot.
+# Reconcile that namespace before verification or launching any pane.
+/var/jb/usr/bin/python3 "$EXEC_ALIAS"
 if [ ! -f "$BASE_CARRIER_APP/Info.plist" ] ||
    [ ! -x "$BASE_CARRIER_EXECUTABLE" ]; then
     echo "[ERROR] Settings extension carrier is missing: $BASE_CARRIER_APP" >&2

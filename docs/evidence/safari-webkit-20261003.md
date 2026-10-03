@@ -76,9 +76,19 @@ FATAL: Could not allocate gigacage memory with maxAlignment = %lu, totalSize = %
 `0x1a37a3ba0`；实际 Mach-O 的 indirect symbol table 将它解析为
 `_sandbox_apply`。返回值非零即跳到上述终止路径。
 `libsandbox.1.dylib+0x183c7bb84` 根据传入 profile 的字段选择 kernel
-policy operation 0 或 1，再提交 profile。具体传入配置、errno 和内核
+policy operation 0 或 1，再提交 profile。具体传入配置和内核
 拒绝原因仍需核对。这与 WebContent 的
 地址预留失败是两个待解决问题，不能用关闭其中一个检查代替修复。
+
+`runtime-confirmed via safari-sandbox-diagnostic2.log`：后续实机日志为：
+
+```text
+com.apple.WebKit.Networking: Could not apply cached sandbox: Operation not supported
+com.apple.WebKit.Networking: Could not apply compiled sandbox: Operation not supported
+```
+
+这确认了应用失败的错误文本，尚未确认内核拒绝位置和 profile 格式。
+此次实验 job 已卸载，避免重复失败造成持续进程重启。
 
 ## 证据和回滚副本
 
