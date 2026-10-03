@@ -30,5 +30,15 @@ Validation: `python3 misc/test_import_directory.py` passed; Theos arm64
 macwshostd build passed. The new daemon was signed with its existing profile,
 trustcached, and atomically installed. The running daemon was not restarted;
 the startup repair takes effect at its next normal lifecycle. Permissions
-were separately repaired in the current session. A full provider transfer
-has not yet been verified; provider-source access failures are separate.
+were separately repaired in the current session. The native Host's existing
+`test-drop-file` action subsequently reported:
+
+```
+1791069045.696 interop-provider-load item=0 kind=file-url type=public.file-url accepted=YES error=nil
+1791069045.698 interop-drop-probe file=macws-drop-probe-14DF7633-0411-443C-93C8-50F10A59AEDB.txt window=257 pid=70909 applied=YES error=nil
+```
+
+The staged file and source fixture both matched the expected 36 bytes. Only
+these two exact matching test files were removed. This proves provider-file
+staging and publication, not the receiving application's final paste action.
+Other provider-source access failures remain separate.
