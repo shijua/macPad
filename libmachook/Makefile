@@ -19,6 +19,7 @@ libmachook_FILES += Compatibility/MacWSOfficeMultiplyFilter.m
 libmachook_FILES += Compatibility/MacWSForkFix.c Compatibility/MacWSForkFix.S
 libmachook_FILES += Compatibility/MacWSSendfile.c
 libmachook_FILES += Compatibility/MacWSElectronPageAllocator.c
+libmachook_FILES += Compatibility/MacWSTLSPublicKey.m
 libmachook_FRAMEWORKS = AudioToolbox CoreGraphics CoreImage ImageIO IOKit IOSurface Metal
 # -isystem: use the vendored iOS xpc headers (the theos iPhoneOS SDK ships
 # without xpc/). See ../vendor/ios-xpc/README.md.
