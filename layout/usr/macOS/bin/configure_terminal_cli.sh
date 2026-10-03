@@ -23,4 +23,11 @@ if ! grep -Fq "$TERMINAL_CLI_ENV_MARKER" "$TERMINAL_USER_BASHRC" 2>/dev/null; th
 		printf "alias neofetch='command /usr/local/bin/macws-neofetch'\n"
 	} >> "$TERMINAL_USER_BASHRC"
 fi
-echo '[INFO] Terminal CLI priority and fast neofetch profile are installed'
+TERMINAL_TLS_MARKER='# MacWS: verified curl TLS backend v1'
+if ! grep -Fq "$TERMINAL_TLS_MARKER" "$TERMINAL_USER_BASHRC" 2>/dev/null; then
+	{
+		printf '\n%s\n' "$TERMINAL_TLS_MARKER"
+		printf 'export CURL_SSL_BACKEND="${CURL_SSL_BACKEND:-openssl}"\n'
+	} >> "$TERMINAL_USER_BASHRC"
+fi
+echo '[INFO] Terminal CLI and verified curl TLS profiles are installed'
