@@ -65,4 +65,6 @@ endif
 
 libmachook_INSTALL_PATH = /usr/macOS/lib
 
+libmachook_FILES += Compatibility/MacWSResponsibilityIdentity.c
+
 include $(THEOS_MAKE_PATH)/library.mk

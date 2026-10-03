@@ -1027,6 +1027,9 @@ if [ -f "$SYSTEMSTATUSD" ] &&
     ldid -S"$ENT" -M "$SYSTEMSTATUSD" || exit 1
 fi
 add_all_trustcache "$SYSTEMSTATUSD"
+# Admit the stock Sonoma TCC daemon using the existing project profile.
+ensure_project_signature_and_trustcache \
+    "$ROOTFS/System/Library/PrivateFrameworks/TCC.framework/Support/tccd" || exit 1
 if [ ! -e "/var/mnt/rootfs/System/Library/CoreServices/launchservicesd.dylib" ]; then
 	cp -vf /var/jb/usr/macOS/Frameworks/launchservicesd.dylib "/var/mnt/rootfs/System/Library/CoreServices/launchservicesd.dylib"
 fi

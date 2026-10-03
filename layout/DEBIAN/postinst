@@ -808,6 +808,8 @@ if [ -d "$ROOTFS/System/Library" ]; then
     # the generic project profile's system-container entitlement is invalid in
     # this chroot and causes an immediate sandbox kill.
     ensure_private_cfprefsd || exit 1
+    tccd_target="$ROOTFS/System/Library/PrivateFrameworks/TCC.framework/Support/tccd"
+    ensure_chroot_application_signature "$tccd_target" || exit 1
     # Shader compatibility artifacts are data, not trustcache state. A package
     # upgrade can therefore leave every executable sentinel valid while an old
     # secondary QuartzCore library remains installed. Provision and validate

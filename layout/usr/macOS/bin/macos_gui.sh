@@ -52,6 +52,9 @@ OPENDIRECTORY_PLIST="$MACOS_DAEMONS/com.macwsguide.opendirectory.plist"
 ACCOUNT_POLICY_PLIST="$MACOS_DAEMONS/com.macwsguide.accountpolicy.plist"
 FILECOORDINATION_PLIST="$MACOS_DAEMONS/com.macwsguide.filecoordination.plist"
 SYSTEMSTATUSD_PLIST="$MACOS_DAEMONS/com.apple.systemstatusd.plist"
+TCC_SYSTEM_PLIST="$MACOS_DAEMONS/com.macwsguide.tccd-system.plist"
+TCC_SYSTEM_LABEL=com.macwsguide.tccd-system
+TCC_USER_PLIST="$MACOS_DAEMONS/com.macwsguide.tccd-user.plist"
 FONTD_PLIST="$MACOS_DAEMONS/com.macwsguide.xtyped.plist"
 VIEWBRIDGE_PLIST="$MACOS_DAEMONS/com.macwsguide.viewbridge.plist"
 EXTENSIONKIT_PLIST="$MACOS_DAEMONS/com.macwsguide.extensionkit.plist"
@@ -1281,6 +1284,7 @@ start_ws_dependents_after_replacement() {
     # WindowServer/CGS client. Keep that process alive even when remote RFB is
     # disabled; write_plists then binds its RFB listener to localhost only.
     rm -f "$VNC_POINTER_PROXY_SOCKET"
+    prepare_pointer_input_access || return 1
     launchctl load "$VNC_PLIST" 2>/dev/null
     wait_for_vnc_pointer_proxy || {
         log "watchdog: local Mission Control pointer proxy did not recover"
@@ -1626,6 +1630,8 @@ restore_cold_boot_trust() {
         "$ROOTFS$P_SHAREDFILELISTD" \
         "$ROOTFS/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer" \
         "$ROOTFS/System/Library/PrivateFrameworks/SystemStatusServer.framework/Support/systemstatusd" \
+        "$ROOTFS/System/Library/PrivateFrameworks/TCC.framework/Support/tccd" \
+        "$ROOTFS/System/Library/Frameworks/Security.framework/Versions/A/PlugIns/csparser.bundle/Contents/MacOS/csparser" \
         "$ROOTFS/usr/local/libexec/macws-cfprefsd" \
         "$ROOTFS/usr/sbin/coreaudiod" \
         "$ROOTFS/System/Library/Frameworks/AudioToolbox.framework/AudioComponentRegistrar" \
@@ -3521,6 +3527,7 @@ cleanup_macos() {
     # jobs from historical labels or malformed older plists.
     launchctl unload "$GUI_LAUNCHD_DIR" 2>/dev/null
     launchctl unload "$MACOS_DAEMONS" 2>/dev/null
+    launchctl remove "$TCC_SYSTEM_LABEL" 2>/dev/null
     # Upgrade cleanup for labels no longer represented by a current plist.
     launchctl remove com.macwsguide.dockhelper 2>/dev/null
     launchctl remove "$WINDOWSERVER_LEGACY_LABEL" 2>/dev/null
@@ -3583,6 +3590,41 @@ cleanup_macos() {
         "$RENDER_ACTIVITY"
     sleep 1
     log "Cleanup done."
+}
+
+publish_macos_tcc_service() {
+    local snapshot=""
+    [ -f "$TCC_SYSTEM_PLIST" ] || {
+        log "ERROR: macOS TCC service job is missing: $TCC_SYSTEM_PLIST"
+        return 1
+    }
+    if ! launchctl print "user/501/$TCC_SYSTEM_LABEL" >/dev/null 2>&1; then
+        launchctl load "$TCC_SYSTEM_PLIST" || return 1
+    fi
+    snapshot=$(launchctl print "user/501/$TCC_SYSTEM_LABEL" 2>&1) || {
+        log "ERROR: Sonoma tccd.system launchd job was not registered."
+        printf '%s\n' "$snapshot" >&2
+        return 1
+    }
+    printf '%s\n' "$snapshot" | grep -Fq 'com.macwsguide.tccd.system' || {
+        log "ERROR: Sonoma tccd.system Mach service was not published."
+        printf '%s\n' "$snapshot" >&2
+        tail -n 30 "$LOGDIR/tccd-system-macos.log" 2>/dev/null || true
+        return 1
+    }
+    log "Sonoma tccd.system is registered on its private, demand-started TCC service."
+}
+
+prepare_pointer_input_access() {
+    publish_macos_tcc_service || return 1
+    if ! /var/jb/usr/bin/timeout -k 2 15 \
+            "$CHROOTEXEC" 0 0 "$ROOTFS" "$WORKSPACECTL_BIN" \
+            prepare-input-access > "$LOGDIR/input-access.log" 2>&1; then
+        log "ERROR: Sonoma TCC did not authorize the desktop input owner."
+        tail -n 20 "$LOGDIR/input-access.log" >&2
+        return 1
+    fi
+    log "Sonoma PostEvent authorization is ready for the desktop input owner."
 }
 
 mode_coexist() {
@@ -4835,6 +4877,10 @@ start_macos() {
     # must exist before any GUI application can enter that dependency chain.
     log "Publishing macOS ViewBridge, ExtensionKit and HIServices services..."
     publish_settings_service_contracts || return 1
+    publish_macos_tcc_service || return 1
+    launchctl load "$TCC_USER_PLIST" || return 1
+    launchctl print user/501/com.macwsguide.tccd-user | \
+        grep -Fq 'com.macwsguide.tccd' || return 1
     log "Publishing Ventura authorization and DesktopServices helpers..."
     publish_desktop_operation_services || return 1
 
@@ -5030,6 +5076,7 @@ start_macos() {
         log "Starting localhost-only Mission Control pointer proxy (launchd job '$VNC_LABEL')..."
     fi
     rm -f "$LOGDIR/osxvnc.log" "$VNC_POINTER_PROXY_SOCKET"
+    prepare_pointer_input_access || return 1
     launchctl load "$VNC_PLIST" || return 1
     wait_for_vnc_pointer_proxy || return 1
     started_ws_unchanged "OSXvnc pointer-proxy startup" || return 1

@@ -20,6 +20,7 @@
 #import "utils.h"
 #include "macws_sonoma_resource_abi.h"
 #include "macws_display_profiles.h"
+#include "macws_tcc_connection.h"
 #import <sys/mman.h>
 #import <sys/stat.h>
 #import <fcntl.h>
@@ -5508,9 +5509,63 @@ static void macws_configure_mono_interpreter_if_requested(void) {
 
 extern void MacWSInstallAudioRenderBridge(void);
 
+// RE-confirmed: Sonoma libquarantine+0x18c188b34 sends Quarantine
+// operation 0xb6 using token pid+pidversion. iPadOS returns ENOPOLICY;
+// tccd then reports "Failed to create Attribution Chain from message".
+// Without that policy, attribute a verified live process to itself. TCC
+// still reads its real identity, entitlements and authorization database.
+static int (*macws_original_responsible_token)(
+    const audit_token_t *, audit_token_t *, void *, void *);
+
+static int macws_responsible_token(const audit_token_t *source,
+                                 audit_token_t *responsible,
+                                 void *identity, void *options) {
+    int result = macws_original_responsible_token(
+        source, responsible, identity, options);
+    int saved_errno = errno;
+    if (result == 0 || saved_errno != ENOPOLICY || !source ||
+        !responsible || identity || options || source->val[5] == 0)
+        return result;
+    mach_port_t task = MACH_PORT_NULL;
+    audit_token_t actual = {{0}};
+    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+    kern_return_t status = task_name_for_pid(
+        mach_task_self(), (int)source->val[5], &task);
+    if (status == KERN_SUCCESS) {
+        status = task_info(task, TASK_AUDIT_TOKEN,
+                           (task_info_t)&actual, &count);
+        mach_port_deallocate(mach_task_self(), task);
+    }
+    if (status != KERN_SUCCESS || count != TASK_AUDIT_TOKEN_COUNT ||
+        memcmp(source, &actual, sizeof(actual)) != 0) {
+        errno = saved_errno;
+        return result;
+    }
+    *responsible = actual;
+    errno = 0;
+    fprintf(stderr, "TCC responsibility self-attribution pid=%u version=%u\n",
+            actual.val[5], actual.val[7]);
+    return 0;
+}
+
+extern void MacWSInstallResponsibilityIdentity(void);
+
+static void macws_install_responsibility_compatibility(void) {
+    MacWSInstallResponsibilityIdentity();
+    const char *program = getprogname();
+    if (!program || strcmp(program, "tccd") != 0 ||
+        macws_original_responsible_token) return;
+    void *target = dlsym(RTLD_DEFAULT,
+        "responsibility_get_responsible_audit_token_for_audit_token");
+    if (target) MSHookFunction(target, (void *)macws_responsible_token,
+                              (void **)&macws_original_responsible_token);
+}
+
 void loadImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) {
     Dl_info info = {};
     (void)dladdr(header, &info);
+    if (info.dli_fname && strstr(info.dli_fname, "/libquarantine.dylib"))
+        macws_install_responsibility_compatibility();
     if (info.dli_fname &&
         (strstr(info.dli_fname, "/AudioToolbox.framework/") != NULL ||
          strstr(info.dli_fname, "/AudioUnit.framework/") != NULL)) {
@@ -5596,9 +5651,6 @@ void loadImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) 
             }
         });
         
-        // grant all permissions
-        MSHookFunction(MSFindSymbol((MSImageRef)header, "_audit_token_check_tcc_access"), hooked_return_1, NULL);
-            
         // NSLog(@"#### debugbydcmmc loadImageCallback before OFF_SkyLight_WSSystemCanCompositeWithMetal");
 #if FORCE_SW_RENDER
         // skip Metal check (WSSystemCanCompositeWithMetal::once)
@@ -14337,6 +14389,12 @@ static const char *macws_private_bootstrap_lsd_service_name(const char *name) {
 
 static const char *macws_private_bootstrap_service_name(const char *name) {
     if (!name) return name;
+    // iPadOS owns the public TCC bootstrap name. Keep Sonoma clients on
+    // the real chroot TCC services and preserve their consent decisions.
+    if (!strcmp(name, "com.apple.tccd.system"))
+        return "com.macwsguide.tccd.system";
+    if (!strcmp(name, "com.apple.tccd"))
+        return "com.macwsguide.tccd";
     // Runtime-confirmed Sonoma PAM requests the stock OD API. Its local-node
     // and account-policy protocols work when hosted by the matching daemons.
     static const char *directoryPublic[] = {
@@ -15331,7 +15389,7 @@ xpc_connection_t macws_xpc_connection_create_mach_service_early(
     if (name != originalName)
         macws_trace_xpc_name("xpc_mach_service.mapped", name);
     return macws_xpc_connection_create_mach_service_raw(
-        name, targetq, flags);
+        name, targetq, macws_tcc_connection_flags(name, flags));
 }
 
 // GeoServices does not create its daemon listener through xpc_main or

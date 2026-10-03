@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.macwsguide.tccd-system</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/macOS/bin/launchdchrootexec</string>
+        <string>0</string>
+        <string>0</string>
+        <string>/var/mnt/rootfs</string>
+        <string>/System/Library/PrivateFrameworks/TCC.framework/Support/tccd</string>
+        <string>system</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.macwsguide.tccd.system</key>
+        <true/>
+    </dict>
+    <key>POSIXSpawnType</key>
+    <string>Adaptive</string>
+    <key>EnablePressuredExit</key>
+    <true/>
+    <key>PublishesEvents</key>
+    <dict>
+        <key>com.macwsguide.tccd.events</key>
+        <dict>
+            <key>DomainInternal</key>
+            <true/>
+        </dict>
+    </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>XPC_SERVICE_NAME</key>
+        <string>com.macwsguide.tccd-system</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/tccd-system-macos.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/tccd-system-macos.log</string>
+</dict>
+</plist>

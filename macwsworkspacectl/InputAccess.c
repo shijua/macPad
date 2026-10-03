@@ -53,6 +53,19 @@ int MacWSPrepareInputAccess(void) {
             return 1;
         }
     }
-    printf("input-access: PostEvent authorized for fixed session input owners\n");
+    CFStringRef *captureService = (CFStringRef *)dlsym(
+        framework, "kTCCServiceScreenCapture");
+    if (!captureService || !*captureService) {
+        fprintf(stderr, "input-access: ScreenCapture management API unavailable\n");
+        return 69;
+    }
+    // The window-mode host receives only this daemon's capture surfaces.
+    // Keep WindowServer's cross-process capture authorization intact.
+    if (!setForPath(*captureService, CFSTR("/usr/local/bin/macwsdisplayd"), true)) {
+        fprintf(stderr, "input-access: TCC refused the display-owner grant\n");
+        return 1;
+    }
+    printf("input-access: PostEvent authorized for fixed session input owners; "
+           "ScreenCapture authorized for macwsdisplayd\n");
     return 0;
 }
