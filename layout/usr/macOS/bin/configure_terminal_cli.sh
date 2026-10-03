@@ -42,4 +42,7 @@ for TERMINAL_LOGIN_PROFILE in "$ROOTFS/var/root/.profile" "$ROOTFS/Users/root/.p
 		} >> "$TERMINAL_LOGIN_PROFILE"
 	fi
 done
+if [ -d "$ROOTFS/usr/lib/zsh/5.9" ]; then
+	/var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_prepare_zsh_modules.py "$ROOTFS"
+fi
 echo '[INFO] Terminal CLI and verified curl TLS profiles are installed'

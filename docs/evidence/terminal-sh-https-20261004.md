@@ -13,7 +13,7 @@ The configuration installer now also appends its existing TLS marker to
 CURL_SSL_BACKEND override and leaves certificate verification enabled.
 
 Actual keyboard records were sent to Terminal PID 44002, window 799. Its
-existing sh sourced the configured profile and ran the three HTTPS checks.
+interactive shell sourced the configured profile and ran the three HTTPS checks.
 Runtime-confirmed via `/tmp/macws-terminal-https-result.log` inside chroot:
 
 ```

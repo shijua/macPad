@@ -1596,6 +1596,9 @@ application_trust_thermally_safe() {
 }
 
 restore_cold_boot_trust() {
+    if [ -d "$ROOTFS/usr/local/lib/macws-zsh/5.9" ]; then
+        /var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_prepare_zsh_modules.py "$ROOTFS" || return 1
+    fi
     local path=""
     local thermal_arguments=(--thermal-tool /var/jb/usr/macOS/bin/macwsthermal)
     if [ "${MACWS_ALLOW_THERMAL_PRESSURE:-0}" = 1 ]; then
