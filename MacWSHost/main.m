@@ -3648,7 +3648,8 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     __weak typeof(self) weakSelf = self;
     BOOL requested = MacWSRequestNativeSceneSizeWithRole(
         windowScene, sceneTarget, restrictionMinimum, restrictionMaximum,
-        fixedWidth, fixedHeight, NO, NO,
+        fixedWidth, fixedHeight,
+        [reason isEqualToString:@"initial-layout-postcondition-failed"], NO,
         ^(CGSize actualSceneSize, BOOL landed) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf ||
