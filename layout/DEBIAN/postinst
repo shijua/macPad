@@ -760,6 +760,7 @@ if [ -d "$ROOTFS/System/Library" ]; then
         "$ROOTFS/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/XPCServices/csnameddatad.xpc/Contents/MacOS/csnameddatad" || exit 1
     ensure_chroot_application_signature \
         "$ROOTFS/System/Library/CoreServices/coreservicesd" || exit 1
+    /var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_prepare_profiler_plugins.py || exit 1
     ensure_chroot_extensionkit_signature \
         "$ROOTFS/System/Library/Frameworks/ExtensionFoundation.framework/Versions/A/XPCServices/extensionkitservice.xpc/Contents/MacOS/extensionkitservice" || exit 1
     ensure_chroot_appearance_signature \

@@ -62,3 +62,49 @@ System Information 现在创建真实主窗口（PID 16214，window 262），
 直接 AppInput 点击只高亮 General 的 About 行，仍需核验扩展输入路由。
 
 完整本地证据：`tmp/sonoma-14.0/priority-20261003/`。
+
+## 报告插件：后续实机修复
+
+`runtime-confirmed via system-profiler-datatypes.log`：首次命令只有
+`Available Datatypes:`，没有任何类型；插件目录文件存在。
+
+实际 arm64e 插件加载探针（SPPlatformReporter）返回：
+
+```text
+dlopen_preflight(.../SPPlatformReporter) => false, tried: ... (fat file, but missing compatible architecture (have 'x86_64,arm64e', need 'arm64'))
+```
+
+仅将同一插件的真实 arm64e slice 拆出、签名并注册 trustcache 后：
+
+```text
+PROFILER bundle=yes executable=.../SPPlatformReporter loaded=1 error=(null) class=SPPlatformReporter
+Available Datatypes:
+SPHardwareDataType
+```
+
+批量准备扫描实际 Info.plist 的 CFBundleExecutable，保留原始镜像备份；
+检查 fat 表边界、重复/重叠 slice、CPU header，选择真实 arm64e（否则
+arm64）镜像。AppleDouble、资源包和没有 ARM64 镜像的包不作为代码加载。
+使用原始插件代码，没有修改报告函数或返回伪造硬件数据。
+
+`profiler-batch-preparation.log` 核验 51 个镜像并注册 50 个新增 hash。
+前面部分运行已处理部分镜像，最终一轮转换 43 个。
+`system-information-plugin-batch.png` 显示真实分类列表与硬件报告：
+8 个核心、7.35 GB 内存。芯片仍为 Unknown，其余分类尚需逐项验证。
+截图含设备身份信息，仅保存在本地，不加入 Git。
+
+插件原始镜像：`/var/jb/var/lib/macws/profiler-plugin-originals/`；
+首个单插件 A/B 原始镜像另存于
+`/var/jb/var/mobile/sonoma-workspace-originals/profiler-plugins-20261003/`。
+安装和正常 macOS 启动均调用准备工具恢复重启后易失的 trustcache。
+
+General 扩展输入 A/B 尚未完成修复：实机 TCCD 确认 subject 为
+`com.apple.systempreferences.GeneralSettings`，拒绝原因：
+
+```text
+Refusing TCCAccessRequest for service kTCCServicePostEvent from extension ... extension point disallows prompting
+AUTHREQ_RESULT: ... authValue=0, authReason=12, authVersion=1, error=(null)
+```
+
+对该单独 bundle ID 的诊断 setter 返回成功，但真实 preflight 仍为 1。
+因此没有将这次授权扩展加入生产授权范围。必须继续查原生托管事件路由。

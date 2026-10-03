@@ -4578,6 +4578,7 @@ toggle_native_launchpad() {
 
 start_macos() {
     local ws_log_start_line=1 waited=0 macos_started=$SECONDS macos_stage_started=$SECONDS
+    /var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_prepare_profiler_plugins.py || return 1
     if [ -f "$LOGDIR/WindowServer.err" ]; then
         ws_log_start_line=$(( $(wc -l < "$LOGDIR/WindowServer.err") + 1 ))
     fi
