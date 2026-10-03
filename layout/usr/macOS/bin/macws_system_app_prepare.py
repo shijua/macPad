@@ -88,9 +88,36 @@ def has_profile(path, records):
     return True
 
 
+def bundle_identifier(path):
+    directory = os.path.dirname(path)
+    if os.path.basename(directory) != 'MacOS' or os.path.basename(os.path.dirname(directory)) != 'Contents':
+        raise ValueError('main executable is outside bundle Contents/MacOS')
+    info_path = os.path.join(os.path.dirname(directory), 'Info.plist')
+    with open(info_path, 'rb') as stream:
+        info = plistlib.load(stream)
+    identifier = info.get('CFBundleIdentifier')
+    if not isinstance(identifier, str) or not identifier or len(identifier) > 255 or any(
+            not (character.isascii() and (character.isalnum() or character in '.-'))
+            for character in identifier):
+        raise ValueError('invalid application bundle identifier')
+    if info.get('CFBundleExecutable') != os.path.basename(path):
+        raise ValueError('bundle executable does not match admission target')
+    return identifier
+
+
+def has_identifier(path, records, identifier):
+    for arch in sorted({record['arch'] for record in records}):
+        result = subprocess.run([trust.LDID, '-arch', arch, '-h', path],
+                                capture_output=True, timeout=5, check=True)
+        if ('Identifier=' + identifier).encode() not in result.stdout.splitlines():
+            return False
+    return True
+
+
 def ensure_main_profile(path, state):
     records = native_records(path)
-    if has_profile(path, records):
+    identifier = bundle_identifier(path)
+    if has_profile(path, records) and has_identifier(path, records, identifier):
         return False
     with open(PROFILE, 'rb') as stream:
         profile = plistlib.load(stream)
@@ -109,10 +136,10 @@ def ensure_main_profile(path, state):
         # The established two-pass signing transaction handles ldid growing
         # LC_CODE_SIGNATURE. Never overwrite a potentially mapped inode.
         for _ in range(2):
-            subprocess.run([trust.LDID, '-S' + PROFILE, '-M', candidate],
+            subprocess.run([trust.LDID, '-I' + identifier, '-S' + PROFILE, '-M', candidate],
                            capture_output=True, timeout=10, check=True)
         prepared = native_records(candidate)
-        if not has_profile(candidate, prepared):
+        if not has_profile(candidate, prepared) or not has_identifier(candidate, prepared, identifier):
             raise ValueError('candidate still lacks chroot execution policy')
         trust.restore({record['hash'] for record in prepared})
         if trust.identity(os.stat(path)) != before:

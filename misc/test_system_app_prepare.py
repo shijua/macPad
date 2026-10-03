@@ -24,6 +24,12 @@ class SystemAppPreparation(unittest.TestCase):
         self.root = Path(self.folder.name)
         self.binary = self.root / 'Main'
         self.binary.write_bytes(macho())
+        active = patch.object(app, 'bundle_identifier', return_value='com.apple.TestApp')
+        active.start()
+        self.addCleanup(active.stop)
+        active = patch.object(app, 'has_identifier', return_value=True)
+        active.start()
+        self.addCleanup(active.stop)
         self.state = self.root / 'state'
         self.state.mkdir()
         self.profile = self.root / 'profile.plist'
@@ -72,6 +78,7 @@ class SystemAppPreparation(unittest.TestCase):
             for call in sign.call_args_list:
                 self.assertNotEqual(call.args[0][-1], str(self.binary))
                 self.assertIn('-M', call.args[0])
+                self.assertIn('-Icom.apple.TestApp', call.args[0])
             restore.assert_called_once()
         self.assertNotEqual(inode, self.binary.stat().st_ino)
         self.assertEqual(next(self.state.glob('original-*')).read_bytes(), macho())
@@ -87,6 +94,17 @@ class SystemAppPreparation(unittest.TestCase):
         self.assertEqual(inode, self.binary.stat().st_ino)
         self.assertEqual(self.binary.read_bytes(), macho())
         self.assertEqual(list(self.root.glob('.macws-admission-*')), [])
+
+    def test_existing_profile_with_temporary_identifier_is_repaired(self):
+        with patch.object(app, 'has_profile', return_value=True), \
+                patch.object(app, 'has_identifier', side_effect=[False, True]), \
+                patch.object(app.os, 'chown'), \
+                patch.object(app.subprocess, 'run') as sign, \
+                patch.object(trust, 'restore', return_value=(1, 'test')):
+            self.assertTrue(app.ensure_main_profile(str(self.binary), str(self.state)))
+            self.assertEqual(sign.call_count, 2)
+            for call in sign.call_args_list:
+                self.assertIn('-Icom.apple.TestApp', call.args[0])
 
     def test_warm_preparation_still_checks_live_main_and_plugin_trust(self):
         plugins = self.root / 'PlugIns'
@@ -117,6 +135,31 @@ class SystemAppPreparation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'escapes rootfs'):
             app.dynamic_plugin_roots({'main': {'loads': [
                 '/System/Library/Frameworks/AddressBook.framework/AddressBook']}})
+
+
+class BundleIdentity(unittest.TestCase):
+    def test_actual_metadata_and_mismatched_executable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            contents = Path(folder) / 'App.app/Contents'
+            binary = contents / 'MacOS/Main'
+            binary.parent.mkdir(parents=True)
+            info = contents / 'Info.plist'
+            info.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.apple.TestApp',
+                                            'CFBundleExecutable': 'Main'}))
+            self.assertEqual(app.bundle_identifier(str(binary)), 'com.apple.TestApp')
+            with self.assertRaisesRegex(ValueError, 'does not match'):
+                app.bundle_identifier(str(binary.parent / 'Helper'))
+            info.write_bytes(plistlib.dumps({'CFBundleIdentifier': '-Ievil/escape',
+                                            'CFBundleExecutable': 'Main'}))
+            with self.assertRaisesRegex(ValueError, 'invalid'):
+                app.bundle_identifier(str(binary))
+
+    def test_every_native_slice_must_have_exact_identifier(self):
+        records = [{'arch': 'arm64'}, {'arch': 'arm64e'}]
+        results = [subprocess.CompletedProcess([], 0, b'Identifier=com.apple.TestApp\n', b''),
+                   subprocess.CompletedProcess([], 0, b'Identifier=.macws-admission-random\n', b'')]
+        with patch.object(app.subprocess, 'run', side_effect=results):
+            self.assertFalse(app.has_identifier('Main', records, 'com.apple.TestApp'))
 
 
 if __name__ == '__main__':
