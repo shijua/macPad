@@ -53,3 +53,28 @@ or adapt the producer/consumer format while preserving the original invariants.
 The local ignored evidence directory
 `tmp/sonoma-14.0/priority-20261003` contains the reader log and iPadOS function
 disassembly. No synthetic pixels or process uptime are used as rendering proof.
+
+## Producer-format candidates inspected subsequently
+
+RE-confirmed via the actual bundled arm64 MTLSimDriver:
+`-[MTLSimDevice init]+0x224` (image offset `0x2c10`) calls
+`setReflectionSerializationVersion:` with 1 or 2 according to the connection
+version. The bundled MetalSerializer setter at `0x4544` stores the value at
+`self+0x38`. A confirmed consumer at `0x3548` reads it for
+`serializeStructType:version:`. This establishes struct-type serialization;
+it does **not** establish control over the failing function-reflection payload.
+No change to that setting has been deployed.
+
+Runtime-confirmed with an independent native symbol probe, followed by
+disassembly of its copied function bytes:
+`MTLUseAirntReflection` is at iPadOS Metal+`0x2ec94` and returns 1 after its
+once initialization (`+0x1c`). `ShouldCreateAIRVersion` at Metal+`0x13dc8`
+also tests that the payload magic differs from `MTLPSBIN`. Sonoma's matching
+functions at `0x18a6058f4` and `0x18a592700` implement the same selection.
+Thus simply enabling AIR reflection is not a demonstrated fix: this captured
+payload is still the legacy binary format.
+
+The read-only probe did not alter any framework, compiler worker, or running
+GUI service. Its symbol output and copied-byte disassembly are retained in the
+ignored evidence directory. Obtaining genuine AIR reflection upstream, or
+deriving a complete translation of the legacy format, remains investigation.
