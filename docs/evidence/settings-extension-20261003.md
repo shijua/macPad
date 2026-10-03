@@ -1,8 +1,8 @@
 # Sonoma 设置面板：2026-10-03 实机证据
 
 设备：iPad13,4，iPadOS 17.0 21A329，Sonoma 14.0 23A344。
-外观、通用、辅助功能、桌面与 Dock 已有真实内容。托管控件的直接输入
-仍需修复，不能把所有设置功能标为完成。
+外观、通用、辅助功能、桌面与 Dock 已有真实内容。外观强调色与 Safari
+设置标签页已验证直接输入；其余面板仍需逐项验证。
 
 ## chroot 内的可执行路径
 
@@ -59,7 +59,27 @@ EXHostViewController: Will try to call delegate 0x13b6bd3e0 'hostViewController:
 `runtime-confirmed via batch-purple.png / settings-global-purple.png`：
 向设置主进程发送精确窗口点击未改变强调色；同一位置经过已授权
 OSXvnc 的 WindowServer 输入通道后，强调色和高亮颜色均变为 Purple。
-这确认输入路径差异，尚未确认是目标窗口路由还是调用进程的 TCC 权限。
+初步确认输入路径差异。后续 A/B 使用同一窗口和同一控件：
+
+`runtime-confirmed via desktop-postevent-identity.log`：TCCD 将 Settings
+归为 `com.apple.systempreferences`，Finder 归为 `com.apple.finder`，
+两者 subject type 均为 0（bundle identity）。实际 task audit token
+传给 `TCCAccessPreflightWithAuditToken` 时，初始结果均为 2。
+`TCCAccessSetForPath` 返回成功后，结果仍为 2。
+
+`RE-confirmed via Sonoma TCC+0x185b1e044`：
+`TCCAccessSetForBundleId` 将第三个参数的布尔值转交给管理实现，
+并以 bundle 类型调用内部 setter。使用上述实际 bundle ID 授权后，
+同一 audit token 的 preflight 均变为 0。
+
+`runtime-confirmed via batch-direct-multicolor.png`：未经重启，同一直接
+AppInput 点击使强调色从 Purple 回到 Multicolor。这确认该控件的
+输入阻碍来自 PostEvent 授权。生产工具只授权固定的 VNC 路径及
+Settings、Finder、Safari、Terminal 四个 bundle ID，保留原有系统检查。
+
+`runtime-confirmed via safari-tabs-after.png / safari-tabs-popup.png`：
+Safari 设置直接点击切到 Tabs，弹出原生 Never / Automatically / Always
+菜单。网页加载仍有独立 WebKit 阻碍，不能以设置窗口可用代替网页验证。
 
 Appearance 和设置主进程仍报告 `com.apple.windowmanager.server` 连接失败。
 既然面板实际托管和显示成功，不能把此错误直接归因为空白界面的原因。

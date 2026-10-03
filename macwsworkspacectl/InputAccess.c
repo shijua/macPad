@@ -15,21 +15,44 @@ int MacWSPrepareInputAccess(void) {
     Boolean (*setForPath)(CFStringRef, CFStringRef, Boolean) = framework
         ? (Boolean (*)(CFStringRef, CFStringRef, Boolean))dlsym(
             framework, "TCCAccessSetForPath") : NULL;
-    if (!service || !*service || !setForPath) {
+    Boolean (*setForBundleID)(CFStringRef, CFStringRef, Boolean) = framework
+        ? (Boolean (*)(CFStringRef, CFStringRef, Boolean))dlsym(
+            framework, "TCCAccessSetForBundleId") : NULL;
+    if (!service || !*service || !setForPath || !setForBundleID) {
         fprintf(stderr, "input-access: Sonoma TCC management API unavailable\n");
         return 69;
     }
     // Runtime-confirmed: __XPostEventRecord rejected OSXvnc with 1002;
     // tccd reported PostEvent Unknown. The stock TCC setter changed the
     // audit-token preflight to 0 and restored the real Dock context menu.
-    // Grant only the session's fixed input owner, before its CGS connection
-    // can cache a denial. Keep WindowServer's authorization check intact.
+    // Grant the session's fixed input owners. Keep WindowServer's
+    // authorization check intact.
     Boolean accepted = setForPath(
         *service, CFSTR("/usr/local/bin/OSXvnc-server"), true);
     if (!accepted) {
         fprintf(stderr, "input-access: TCC refused the input-owner grant\n");
         return 1;
     }
-    printf("input-access: PostEvent authorized for /usr/local/bin/OSXvnc-server\n");
+    // TCCD attributes desktop apps by bundle identity (type 0), not path.
+    // Runtime A/B: path grants left Settings/Finder preflight at 2; bundle
+    // grants changed both to 0 and restored Settings' hosted control clicks.
+    static const char *const desktopOwners[] = {
+        "com.apple.systempreferences", "com.apple.finder",
+        "com.apple.Safari", "com.apple.Terminal",
+    };
+    for (unsigned index = 0;
+         index < sizeof(desktopOwners) / sizeof(desktopOwners[0]); index++) {
+        CFStringRef identifier = CFStringCreateWithCString(
+            NULL, desktopOwners[index], kCFStringEncodingUTF8);
+        if (!identifier) return 1;
+        accepted = setForBundleID(*service, identifier, true);
+        CFRelease(identifier);
+        if (!accepted) {
+            fprintf(stderr, "input-access: TCC refused desktop owner %s\n",
+                    desktopOwners[index]);
+            return 1;
+        }
+    }
+    printf("input-access: PostEvent authorized for fixed session input owners\n");
     return 0;
 }
