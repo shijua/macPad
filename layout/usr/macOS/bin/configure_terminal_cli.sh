@@ -30,4 +30,16 @@ if ! grep -Fq "$TERMINAL_TLS_MARKER" "$TERMINAL_USER_BASHRC" 2>/dev/null; then
 		printf 'export CURL_SSL_BACKEND="${CURL_SSL_BACKEND:-openssl}"\n'
 	} >> "$TERMINAL_USER_BASHRC"
 fi
+# Sonoma's root account launches /bin/sh and login sets its home to /var/root.
+# A sh login reads .profile, not .bashrc. Cover the launcher home as well so
+# direct chroot login shells inherit the same verified backend.
+for TERMINAL_LOGIN_PROFILE in "$ROOTFS/var/root/.profile" "$ROOTFS/Users/root/.profile"; do
+	mkdir -p "${TERMINAL_LOGIN_PROFILE%/*}"
+	if ! grep -Fq "$TERMINAL_TLS_MARKER" "$TERMINAL_LOGIN_PROFILE" 2>/dev/null; then
+		{
+			printf '\n%s\n' "$TERMINAL_TLS_MARKER"
+			printf 'export CURL_SSL_BACKEND="${CURL_SSL_BACKEND:-openssl}"\n'
+		} >> "$TERMINAL_LOGIN_PROFILE"
+	fi
+done
 echo '[INFO] Terminal CLI and verified curl TLS profiles are installed'

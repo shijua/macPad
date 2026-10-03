@@ -32,6 +32,33 @@ class TerminalTLSConfiguration(unittest.TestCase):
                     env=env, check=True, capture_output=True, text=True)
                 self.assertEqual(result.stdout, expected)
 
+    def test_sh_login_profiles_preserve_content_overrides_and_cert_checks(self):
+        with tempfile.TemporaryDirectory() as td:
+            profiles = [Path(td) / home / '.profile'
+                        for home in ('var/root', 'Users/root')]
+            for profile in profiles:
+                profile.parent.mkdir(parents=True)
+                profile.write_text('# existing login settings\n')
+            for _ in range(2):
+                subprocess.run(['sh', str(INSTALLER), td], check=True,
+                               capture_output=True, text=True)
+            for profile in profiles:
+                configured = profile.read_text()
+                self.assertTrue(configured.startswith('# existing login settings\n'))
+                self.assertEqual(configured.count('# MacWS: verified curl TLS backend v1'), 1)
+                self.assertNotIn('insecure', configured)
+                for override, expected in [(None, 'openssl'),
+                                           ('secure-transport', 'secure-transport')]:
+                    env = os.environ.copy()
+                    env.pop('CURL_SSL_BACKEND', None)
+                    if override:
+                        env['CURL_SSL_BACKEND'] = override
+                    result = subprocess.run(
+                        ['sh', '-c', '. "$1"; printf "%s" "$CURL_SSL_BACKEND"',
+                         'test', str(profile)], env=env, check=True,
+                        capture_output=True, text=True)
+                    self.assertEqual(result.stdout, expected)
+
     def test_cli_wrapper_defaults_and_preserves_arguments(self):
         source = (ROOT / "layout/usr/macOS/bin/run_bash.sh").read_text()
         prefix = source.split("/var/jb/usr/macOS/bin/launchdchrootexec", 1)[0]
