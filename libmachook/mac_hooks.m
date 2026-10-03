@@ -3847,6 +3847,45 @@ static id macws_settings_resolved_icon_resource(id provider) {
         ? resource : nil;
 }
 
+static id macws_settings_wallet_icon_resource(id icon) {
+    SEL identifierSelector = sel_registerName("bundleIdentifier");
+    if (![icon respondsToSelector:identifierSelector]) return nil;
+    id identifier = ((id (*)(id, SEL))objc_msgSend)(icon, identifierSelector);
+    if (![identifier isKindOfClass:[NSString class]] ||
+        ![identifier isEqualToString:@"com.apple.WalletSettingsExtension"])
+        return nil;
+    // The actual LS identifier lookup returns -10814, although this Sonoma
+    // extension's declared ICNS resolves and renders through its file URL.
+    NSURL *url = [NSURL fileURLWithPath:
+        @"/System/Library/ExtensionKit/Extensions/WalletSettingsExtension.appex"];
+    NSBundle *bundle = [NSBundle bundleWithURL:url];
+    if (![bundle.bundleIdentifier isEqualToString:identifier] ||
+        ![bundle.infoDictionary[@"CFBundleIconFile"]
+            isEqualToString:@"WalletSettingsExtension.icns"]) return nil;
+    Class bundleIcon = objc_getClass("ISBundleIcon");
+    SEL initializer = sel_registerName("initWithBundleURL:");
+    if (!bundleIcon || !class_getInstanceMethod(bundleIcon, initializer))
+        return nil;
+    id fileIcon = ((id (*)(id, SEL, id))objc_msgSend)(
+        [bundleIcon alloc], initializer, url);
+    SEL providerSelector = sel_registerName("makeSymbolResourceProvider");
+    id provider = [fileIcon respondsToSelector:providerSelector]
+        ? ((id (*)(id, SEL))objc_msgSend)(fileIcon, providerSelector) : nil;
+    SEL resolve = sel_registerName("resolveResources");
+    SEL resourceSelector = sel_registerName("iconResource");
+    id resource = nil;
+    if ([provider respondsToSelector:resolve] &&
+        [provider respondsToSelector:resourceSelector]) {
+        ((void (*)(id, SEL))objc_msgSend)(provider, resolve);
+        resource = ((id (*)(id, SEL))objc_msgSend)(provider, resourceSelector);
+    }
+    Class icns = objc_getClass("ISIcns");
+    if (!icns || ![resource isKindOfClass:icns]) resource = nil;
+    id result = [[resource retain] autorelease];
+    [fileIcon release];
+    return result;
+}
+
 static id macws_settings_concrete_icon_image(id self, SEL selector,
                                               id imageDescriptor) {
     if (g_macws_rendering_settings_concrete_icon || !self ||
@@ -3863,6 +3902,7 @@ static id macws_settings_concrete_icon_image(id self, SEL selector,
         [provider respondsToSelector:supportsSelector] &&
         ((BOOL (*)(id, SEL))objc_msgSend)(provider, supportsSelector);
     id resource = macws_settings_resolved_icon_resource(provider);
+    if (!resource) resource = macws_settings_wallet_icon_resource(self);
 
     CGSize size = CGSizeMake(32.0, 32.0);
     SEL sizeSelector = sel_registerName("size");
