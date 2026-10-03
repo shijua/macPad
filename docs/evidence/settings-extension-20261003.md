@@ -37,8 +37,9 @@ Sandbox: hook..execve() killing com.apple.Appearance-Settings.extension[pid=8678
 不能据此断言是哪一个条件触发。
 
 THEORY：root 桌面与 carrier 降为 UID 501 的身份差异可能参与失败。
-仅 Appearance carrier 的 UID 对照诊断已保存原始二进制及权限，
-尚待解锁后的运行和可见面板验证。没有跳过 libxpc 检查。
+仅 Appearance carrier 的 UID 对照诊断已保存原始二进制及权限。
+锁屏阻止运行验证，现已恢复原始 carrier，诊断副本保存在同一备份目录；
+解锁后再进行运行和可见面板验证。没有跳过 libxpc 检查。
 
 本地完整证据位于 `tmp/sonoma-14.0/priority-20261003/`。
 单个 carrier 的回滚副本位于设备
