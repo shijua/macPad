@@ -13,6 +13,45 @@ FUNCTION = SOURCE[START:SOURCE.index('\n}', START) + 2]
 
 
 class AppLaunchAdmission(unittest.TestCase):
+    def test_messages_carrier_preserves_launch_failure_and_identity(self):
+        start = SOURCE.index('static BOOL LaunchMessagesViaUIKitCarrier(')
+        function = SOURCE[start:SOURCE.index('\n}', start) + 2]
+        program = r'''
+#import <Foundation/Foundation.h>
+#include <assert.h>
+#include <string.h>
+static const char *kMessagesExecutable =
+    "/System/Applications/Messages.app/Contents/MacOS/Messages";
+static BOOL result;
+static BOOL LaunchCatalystViaUIKitCarrier(const char *identifier,
+    const char *name, const char *executable, const char *bundle,
+    const char *container, NSString **message) {
+    assert(strcmp(identifier, "messages") == 0);
+    assert(strcmp(executable, kMessagesExecutable) == 0);
+    assert(strcmp(bundle, "com.apple.MobileSMS") == 0);
+    assert(strcmp(container,
+        "/Users/mobile/Library/Containers/com.apple.MobileSMS/Data") == 0);
+    *message = result ? @"real carrier accepted" : @"real carrier failed";
+    return result;
+}
+''' + function + r'''
+int main(void) { @autoreleasepool {
+    NSString *message = nil;
+    result = NO;
+    assert(!LaunchMessagesViaUIKitCarrier(&message));
+    assert([message isEqualToString:@"real carrier failed"]);
+    result = YES;
+    assert(LaunchMessagesViaUIKitCarrier(&message));
+    assert([message isEqualToString:@"real carrier accepted"]);
+} return 0; }
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / 'messages-carrier'
+            subprocess.run(['clang', '-x', 'objective-c', '-', '-fobjc-arc',
+                            '-framework', 'Foundation', '-o', str(binary)],
+                           input=program, text=True, capture_output=True, check=True)
+            subprocess.run([str(binary)], capture_output=True, check=True)
+
     def test_native_metal_profile_covers_real_app_bundles(self):
         start = SOURCE.index('static BOOL RootApplicationRequiresNativeMetal(')
         function = SOURCE[start:SOURCE.index('\n}', start) + 2]

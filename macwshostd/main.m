@@ -149,6 +149,8 @@ static const char *const kMapsHostCarrierMarker =
 static const char *const kWeatherExecutable =
     "/System/Applications/Weather.app/Contents/MacOS/Weather";
 static const char *const kWeatherBundleIdentifier = "com.apple.weather";
+static const char *const kMessagesExecutable =
+    "/System/Applications/Messages.app/Contents/MacOS/Messages";
 static const char *const kWeatherContainerHome =
     "/Users/mobile/Library/Containers/com.apple.weather/Data";
 static const char *const kWeatherKnownSceneSessions =
@@ -2079,6 +2081,7 @@ static NSString *ApplicationSessionIdentifierForPath(NSString *rootPath) {
         [rootPath isEqualToString:@(kSteamLiveExecutable)]) return @"steam";
     if ([rootPath isEqualToString:@(kMapsExecutable)]) return @"maps";
     if ([rootPath isEqualToString:@(kWeatherExecutable)]) return @"weather";
+    if ([rootPath isEqualToString:@(kMessagesExecutable)]) return @"messages";
     if ([rootPath isEqualToString:@(kAsphaltExecutable)]) return @"asphalt";
     for (NSUInteger index = 0;
          index < sizeof(kAllowedApps) / sizeof(kAllowedApps[0]); index++) {
@@ -2941,6 +2944,13 @@ static BOOL LaunchWeatherViaUIKitCarrier(NSString **message) {
     return LaunchCatalystViaUIKitCarrier(
         "weather", "天气", kWeatherExecutable,
         kWeatherBundleIdentifier, kWeatherContainerHome, message);
+}
+
+static BOOL LaunchMessagesViaUIKitCarrier(NSString **message) {
+    return LaunchCatalystViaUIKitCarrier(
+        "messages", "信息", kMessagesExecutable,
+        "com.apple.MobileSMS",
+        "/Users/mobile/Library/Containers/com.apple.MobileSMS/Data", message);
 }
 
 static BOOL EnsureVSCodeAudioBridge(NSString **message) {
@@ -3947,6 +3957,8 @@ static BOOL LaunchRequestedPath(const char *requestedPath,
         return LaunchAllowedApp("asphalt", message);
     if ([rootPath isEqualToString:@(kWeatherExecutable)])
         return LaunchAllowedApp("weather", message);
+    if ([rootPath isEqualToString:@(kMessagesExecutable)])
+        return LaunchMessagesViaUIKitCarrier(message);
     if ([rootPath isEqualToString:@(kSteamOuterExecutable)] ||
         [rootPath isEqualToString:@(kSteamLiveExecutable)])
         return LaunchAllowedApp("steam", message);
@@ -3961,6 +3973,8 @@ static BOOL LaunchRequestedPath(const char *requestedPath,
 }
 
 static BOOL LaunchAllowedApp(const char *identifier, NSString **message) {
+    if (identifier && strcmp(identifier, "messages") == 0)
+        return LaunchMessagesViaUIKitCarrier(message);
     if (identifier && strcmp(identifier, "vscode") == 0)
         return LaunchVSCode(message);
     if (identifier && strcmp(identifier, "maps") == 0)
