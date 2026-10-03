@@ -4,6 +4,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #import "MacWSHostDiagnostics.h"
+#import "Transport/MacWSPasteboardSnapshot.h"
 
 #include <CommonCrypto/CommonDigest.h>
 #include <dirent.h>
@@ -1032,8 +1033,30 @@ static NSURL *MacWSResolvedProviderFileURL(id item) {
     NSInteger snapshotChange = pasteboard.changeCount;
     if (self.pendingLocalPasteboardChange < 0)
         self.pendingLocalPasteboardChange = snapshotChange;
+    uint64_t serial = self.localPublishSerial;
+    NSArray<NSItemProvider *> *providers = pasteboard.itemProviders;
+    MacWSLoadPasteboardSnapshot(providers, 5.0,
+        ^(NSArray<NSDictionary *> *snapshot, NSError *error) {
+            if (serial != self.localPublishSerial ||
+                snapshotChange != UIPasteboard.generalPasteboard.changeCount ||
+                MacWSApplyingRemotePasteboard) return;
+            if (error) {
+                // Polling retries only a newer clipboard generation. Repeated
+                // attempts to resolve the same hung provider would accumulate
+                // requests; keep this generation pending until it changes.
+                MacWSLog(@"interop-local-snapshot failed code=%ld",
+                         (long)error.code);
+                return;
+            }
+            [self publishResolvedPasteboardItems:snapshot
+                                  snapshotChange:snapshotChange];
+        });
+}
+
+- (void)publishResolvedPasteboardItems:(NSArray<NSDictionary *> *)snapshot
+                       snapshotChange:(NSInteger)snapshotChange {
     NSMutableArray *pasteItems = [NSMutableArray array];
-    for (NSDictionary *item in pasteboard.items)
+    for (NSDictionary *item in snapshot)
         [pasteItems addObject:[item mutableCopy]];
 
     // UIKit producers are allowed to publish an abstract public.text or
@@ -1049,11 +1072,23 @@ static NSURL *MacWSResolvedProviderFileURL(id item) {
                     UTTypeUTF8PlainText.identifier]) hasUTF8Text = YES;
             UTType *type = [UTType typeWithIdentifier:typeIdentifier];
             if (textItemIndex == NSNotFound &&
-                [type conformsToType:UTTypeText]) textItemIndex = index;
+                [type conformsToType:UTTypePlainText]) textItemIndex = index;
         }
     }
-    NSString *plainText = textItemIndex != NSNotFound && !hasUTF8Text
-        ? pasteboard.string : nil;
+    NSString *plainText = nil;
+    if (textItemIndex != NSNotFound && !hasUTF8Text) {
+        NSDictionary *item = pasteItems[textItemIndex];
+        for (NSString *type in item) {
+            if (![[UTType typeWithIdentifier:type] conformsToType:UTTypePlainText])
+                continue;
+            id value = item[type];
+            if ([value isKindOfClass:NSString.class]) plainText = value;
+            else if ([value isKindOfClass:NSData.class])
+                plainText = [[NSString alloc] initWithData:value
+                    encoding:NSUTF8StringEncoding];
+            if (plainText) break;
+        }
+    }
     if (plainText) {
         NSMutableDictionary *textItem = pasteItems[textItemIndex];
         textItem[UTTypeUTF8PlainText.identifier] = plainText;
@@ -1065,7 +1100,7 @@ static NSURL *MacWSResolvedProviderFileURL(id item) {
                 sortedArrayUsingSelector:@selector(compare:)]
                 componentsJoinedByString:@","]];
         MacWSLog(@"interop-local-publish change=%ld items=%lu types=%@ "
-            "canonical-text=%@", (long)pasteboard.changeCount,
+            "canonical-text=%@", (long)snapshotChange,
             (unsigned long)pasteItems.count,
             [typeSummaries componentsJoinedByString:@" | "],
             plainText ? @"added" : (hasUTF8Text ? @"present" : @"none"));
@@ -1083,31 +1118,35 @@ static NSURL *MacWSResolvedProviderFileURL(id item) {
             });
             return;
         }
-        [self sendArchiveData:archive completion:^(BOOL applied,
-                                                   NSError *sendError) {
-            (void)sendError;
-            if (applied) {
-                self.lastLocalPasteboardChange = snapshotChange;
-                [NSUserDefaults.standardUserDefaults
-                    setInteger:snapshotChange
-                    forKey:MacWSObservedPasteboardChangeDefaultsKey];
-            }
-            if (self.pendingLocalPasteboardChange == snapshotChange)
-                self.pendingLocalPasteboardChange = -1;
-            MacWSDiagnosticLog(@"interop-local-publish-result change=%ld applied=%@ "
-                "current=%ld pending=%ld", (long)snapshotChange,
-                applied ? @"YES" : @"NO",
-                (long)UIPasteboard.generalPasteboard.changeCount,
-                (long)self.pendingLocalPasteboardChange);
-            if (!applied && UIApplication.sharedApplication.applicationState ==
-                    UIApplicationStateActive) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                              500 * NSEC_PER_MSEC),
-                               dispatch_get_main_queue(), ^{
-                    [self localPasteboardChanged:nil];
-                });
-            }
-        }];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (snapshotChange != UIPasteboard.generalPasteboard.changeCount ||
+                MacWSApplyingRemotePasteboard) return;
+            [self sendArchiveData:archive completion:^(BOOL applied,
+                                                       NSError *sendError) {
+                (void)sendError;
+                if (applied) {
+                    self.lastLocalPasteboardChange = snapshotChange;
+                    [NSUserDefaults.standardUserDefaults
+                        setInteger:snapshotChange
+                        forKey:MacWSObservedPasteboardChangeDefaultsKey];
+                }
+                if (self.pendingLocalPasteboardChange == snapshotChange)
+                    self.pendingLocalPasteboardChange = -1;
+                MacWSDiagnosticLog(@"interop-local-publish-result change=%ld applied=%@ "
+                    "current=%ld pending=%ld", (long)snapshotChange,
+                    applied ? @"YES" : @"NO",
+                    (long)UIPasteboard.generalPasteboard.changeCount,
+                    (long)self.pendingLocalPasteboardChange);
+                if (!applied && UIApplication.sharedApplication.applicationState ==
+                        UIApplicationStateActive) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                  500 * NSEC_PER_MSEC),
+                                   dispatch_get_main_queue(), ^{
+                        [self localPasteboardChanged:nil];
+                    });
+                }
+            }];
+        });
     });
 }
 
