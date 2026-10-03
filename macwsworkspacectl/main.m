@@ -1200,6 +1200,8 @@ static int ResolveDocumentApplication(const char *path, const char *output) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc == 2 && strcmp(argv[1], "prepare-input-access") == 0)
+            return MacWSPrepareInputAccess();
         if (argc == 4 && strcmp(argv[1], "resolve-document") == 0)
             return ResolveDocumentApplication(argv[2], argv[3]);
         if (argc >= 2 && strcmp(argv[1], "set-wallpaper") == 0) {
@@ -1268,7 +1270,7 @@ int main(int argc, const char *argv[]) {
             return WriteFileThumbnail(argv[2], argv[3]);
         }
         fprintf(stderr,
-                "usage: macwsworkspacectl set-wallpaper [path] | "
+                "usage: macwsworkspacectl prepare-input-access | set-wallpaper [path] | "
                 "show-launchpad | list-spaces | set-current-space ID | "
                 "ensure-navigation-spaces | create-space | "
                 "repair-launchservices-catalog | "
