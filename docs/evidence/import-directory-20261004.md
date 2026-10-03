@@ -38,7 +38,7 @@ were separately repaired in the current session. The native Host's existing
 1791069045.698 interop-drop-probe file=macws-drop-probe-14DF7633-0411-443C-93C8-50F10A59AEDB.txt window=257 pid=70909 applied=YES error=nil
 ```
 
-The staged file and source fixture both matched the expected 36 bytes. Only
+The staged file and source fixture both matched the expected 35 bytes. Only
 these two exact matching test files were removed. This proves provider-file
 staging and publication, not the receiving application's final paste action.
 Other provider-source access failures remain separate.
