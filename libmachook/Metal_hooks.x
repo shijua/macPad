@@ -2707,6 +2707,30 @@ static CFDictionaryRef macws_copy_namespace_resource_dictionary(
     return adjusted;
 }
 
+// Sonoma BindingBlueprint substitutes `/` with `/System/Volumes/Data`.
+// Runtime A/B on 23A344: our root alias produced LinkBinding flags=4 and
+// resolveBinding's self-reference assertion. Query the actual root vnode's
+// properties only when this exact namespace alias resolves to that vnode.
+static CFURLRef macws_copy_data_root_provider_url(CFURLRef url) {
+    if (!macws_chroot_root_mount_needs_rebase || !url) return NULL;
+    char path[MAXPATHLEN] = {};
+    struct stat root = {}, target = {}, link = {};
+    if (!CFURLGetFileSystemRepresentation(url, true, (UInt8 *)path, sizeof(path)) ||
+        strcmp(path, "/System/Volumes/Data") != 0 ||
+        lstat(path, &link) != 0 || !S_ISLNK(link.st_mode) ||
+        stat("/", &root) != 0 || !S_ISDIR(root.st_mode) ||
+        stat(path, &target) != 0 || root.st_dev != target.st_dev ||
+        root.st_ino != target.st_ino) return NULL;
+    return CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)"/", 1, true);
+}
+
+static CFDictionaryRef macws_copy_data_root_volume_flag(CFDictionaryRef result) {
+    if (!result || !CFDictionaryContainsKey(result, kCFURLIsVolumeKey)) return NULL;
+    CFMutableDictionaryRef adjusted = CFDictionaryCreateMutableCopy(NULL, 0, result);
+    if (adjusted) CFDictionarySetValue(adjusted, kCFURLIsVolumeKey, kCFBooleanTrue);
+    return adjusted;
+}
+
 static id macws_nsurl_get_resources(id self, SEL selector, id keys, id *error) {
     MacWSURLGetResourcesFn original =
         selector == sel_registerName("promisedItemResourceValuesForKeys:error:")
@@ -2716,11 +2740,19 @@ static id macws_nsurl_get_resources(id self, SEL selector, id keys, id *error) {
     // Native macOS omits NSURLParentDirectoryURLKey from a root URL's result
     // dictionary. Query all other requested keys through the original method,
     // preserving real provider errors rather than manufacturing a dictionary.
-    CFArrayRef filtered = macws_copy_root_resource_keys((CFURLRef)self, (CFArrayRef)keys);
-    id result = original(self, selector, filtered ? (id)filtered : keys, error);
+    CFURLRef provider = macws_copy_data_root_provider_url((CFURLRef)self);
+    id providerSelf = provider ? (id)provider : self;
+    CFArrayRef filtered = macws_copy_root_resource_keys((CFURLRef)providerSelf, (CFArrayRef)keys);
+    id result = original(providerSelf, selector, filtered ? (id)filtered : keys, error);
     if (filtered) CFRelease(filtered);
     CFDictionaryRef adjusted = macws_copy_namespace_resource_dictionary(
-        (CFURLRef)self, (CFDictionaryRef)result);
+        (CFURLRef)providerSelf, (CFDictionaryRef)result);
+    if (provider) {
+        CFDictionaryRef volume = macws_copy_data_root_volume_flag(
+            adjusted ?: (CFDictionaryRef)result);
+        if (volume) { if (adjusted) CFRelease(adjusted); adjusted = volume; }
+        CFRelease(provider);
+    }
     return adjusted ? [(id)adjusted autorelease] : result;
 }
 
@@ -2728,11 +2760,18 @@ static CFDictionaryRef macws_cfurl_copy_resource_properties_compat(
     CFURLRef url, CFArrayRef keys, CFErrorRef *error) {
     if (!macws_chroot_root_mount_needs_rebase)
         return CFURLCopyResourcePropertiesForKeys(url, keys, error);
-    CFArrayRef filtered = macws_copy_root_resource_keys(url, keys);
+    CFURLRef provider = macws_copy_data_root_provider_url(url);
+    CFURLRef providerURL = provider ?: url;
+    CFArrayRef filtered = macws_copy_root_resource_keys(providerURL, keys);
     CFDictionaryRef result = CFURLCopyResourcePropertiesForKeys(
-        url, filtered ?: keys, error);
+        providerURL, filtered ?: keys, error);
     if (filtered) CFRelease(filtered);
-    CFDictionaryRef adjusted = macws_copy_namespace_resource_dictionary(url, result);
+    CFDictionaryRef adjusted = macws_copy_namespace_resource_dictionary(providerURL, result);
+    if (provider) {
+        CFDictionaryRef volume = macws_copy_data_root_volume_flag(adjusted ?: result);
+        if (volume) { if (adjusted) CFRelease(adjusted); adjusted = volume; }
+        CFRelease(provider);
+    }
     if (!adjusted) return result;
     CFRelease(result);
     return adjusted;
