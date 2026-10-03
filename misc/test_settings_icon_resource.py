@@ -12,7 +12,7 @@ class SettingsIconResource(unittest.TestCase):
         source = (ROOT / "libmachook/mac_hooks.m").read_text()
         helper = source.split("static id macws_settings_resolved_icon_resource", 1)[1]
         helper = "static id macws_settings_resolved_icon_resource" + helper.split(
-            "\nstatic id macws_settings_concrete_icon_image", 1)[0]
+            "\nstatic id macws_settings_wallet_icon_resource", 1)[0]
         fixture = r'''
 #import <Foundation/Foundation.h>
 #include <objc/runtime.h>
