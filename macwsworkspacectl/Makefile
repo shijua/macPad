@@ -11,7 +11,7 @@ _THEOS_INTERNAL_IFLAGS_BASE = -I$(THEOS_TARGET_INCLUDE_PATH) \
 
 TOOL_NAME = macwsworkspacectl
 
-macwsworkspacectl_FILES = main.m
+macwsworkspacectl_FILES = main.m InputAccess.c
 macwsworkspacectl_CFLAGS = -fobjc-arc -Wall -Wextra
 macwsworkspacectl_FRAMEWORKS = AppKit ApplicationServices Foundation QuickLookThumbnailing
 macwsworkspacectl_CODESIGN_FLAGS = -S../layout/usr/macOS/bin/entitlements.plist

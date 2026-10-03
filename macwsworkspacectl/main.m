@@ -16,6 +16,7 @@
 #import "../include/macws_host_protocol.h"
 
 extern char **environ;
+extern int MacWSPrepareInputAccess(void);
 
 typedef CFTypeRef (*MacWSLSSharedFileListCreateFn)(
     CFAllocatorRef, CFStringRef, CFTypeRef);
