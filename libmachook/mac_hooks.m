@@ -3811,6 +3811,42 @@ static id macws_settings_symbol_image(id self, SEL selector,
     return image;
 }
 
+// Sonoma's ISRecordResourceProvider advertises supportsGraphicIcons=NO but
+// resolveResources still produces an ISGraphicSymbolResource from the real
+// LS extension record. Its symbol getter returns nil, so the symbol-descriptor
+// path renders transparent pixels. Resolve first and inspect the resource;
+// the provider capability flag is not a resource-presence test.
+static id macws_settings_resolved_icon_resource(id provider) {
+    SEL resolve = sel_registerName("resolveResources");
+    SEL resourceSelector = sel_registerName("iconResource");
+    if (!provider || ![provider respondsToSelector:resolve] ||
+        ![provider respondsToSelector:resourceSelector]) return nil;
+    ((void (*)(id, SEL))objc_msgSend)(provider, resolve);
+    id resource = ((id (*)(id, SEL))objc_msgSend)(provider, resourceSelector);
+    Class graphicResource = objc_getClass("ISGraphicSymbolResource");
+    if (graphicResource && [resource isKindOfClass:graphicResource])
+        return resource;
+    // Siri's Settings extension has a real asset-catalog icon, not a symbol.
+    // Keep this direct resource route inside the Settings extension namespace;
+    // ordinary applications still need IconServices' full badge composition.
+    Class assetResource = objc_getClass("ISAssetCatalogResource");
+    Class extensionRecord = objc_getClass("LSApplicationExtensionRecord");
+    SEL recordSelector = sel_registerName("record");
+    if (!assetResource || ![resource isKindOfClass:assetResource] ||
+        !extensionRecord || ![provider respondsToSelector:recordSelector])
+        return nil;
+    id record = ((id (*)(id, SEL))objc_msgSend)(provider, recordSelector);
+    if (![record isKindOfClass:extensionRecord] ||
+        ![record respondsToSelector:@selector(URL)]) return nil;
+    id url = ((id (*)(id, SEL))objc_msgSend)(record, @selector(URL));
+    if (![url isKindOfClass:[NSURL class]] || ![url isFileURL]) return nil;
+    NSString *path = [[url path] stringByStandardizingPath];
+    return [path hasSuffix:@".appex"] &&
+        ([path hasPrefix:@"/System/Library/ExtensionKit/Extensions/"] ||
+         [path hasPrefix:@"/System/Applications/System Settings.app/Contents/PlugIns/"])
+        ? resource : nil;
+}
+
 static id macws_settings_concrete_icon_image(id self, SEL selector,
                                               id imageDescriptor) {
     if (g_macws_rendering_settings_concrete_icon || !self ||
@@ -3826,15 +3862,7 @@ static id macws_settings_concrete_icon_image(id self, SEL selector,
     BOOL supportsGraphic = provider &&
         [provider respondsToSelector:supportsSelector] &&
         ((BOOL (*)(id, SEL))objc_msgSend)(provider, supportsSelector);
-    if (supportsGraphic && [provider respondsToSelector:
-            sel_registerName("resolveResources")]) {
-        ((void (*)(id, SEL))objc_msgSend)(
-            provider, sel_registerName("resolveResources"));
-    }
-    id resource = supportsGraphic && [provider respondsToSelector:
-            sel_registerName("iconResource")]
-        ? ((id (*)(id, SEL))objc_msgSend)(
-              provider, sel_registerName("iconResource")) : nil;
+    id resource = macws_settings_resolved_icon_resource(provider);
 
     CGSize size = CGSizeMake(32.0, 32.0);
     SEL sizeSelector = sel_registerName("size");
