@@ -41,6 +41,7 @@
 // quoted-include search order.
 #include "../include/macws_control_protocol.h"
 #include "../include/macws_file_copy.h"
+#include "../include/macws_import_directory.h"
 #include "../include/macws_host_protocol.h"
 #include "../include/macws_steam_mach_rendezvous_protocol.h"
 #include "../include/macws_steam_semaphore_protocol.h"
@@ -6531,6 +6532,10 @@ int main(int argc, const char *argv[]) {
         }
         HostLog(@"macwshostd starting pid=%d protocol=%u uid=%d", getpid(),
                 MACWS_CONTROL_VERSION, getuid());
+        if (macws_prepare_import_directory(kProviderImportRoot, 501, 501) != 0)
+            HostLog(@"import-directory preparation failed errno=%d", errno);
+        else
+            HostLog(@"import-directory ready uid=501 gid=501 mode=0770");
         StartApplicationSessionSupervisor();
 
         xpc_connection_t (*createMach)(const char *, dispatch_queue_t, uint64_t) =
