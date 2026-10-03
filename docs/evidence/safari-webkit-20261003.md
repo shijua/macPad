@@ -55,6 +55,12 @@ FATAL: Could not allocate gigacage memory with maxAlignment = %lu, totalSize = %
 项目执行配置已有扩展虚拟地址权限；添加相同权限不能作为已解决的证据。
 源码用于交叉核对，尚未反编译设备内核的该函数。
 
+补充 `runtime-confirmed via vm-boundary.log`：原生探针只申请 16 KiB，
+`vm_allocate` 在固定地址 `0x800000000` 成功；在 `0xff0000000`、
+`0x1000000000`、`0x1800000000`、`0x2000000000` 返回
+`KERN_INVALID_ADDRESS`（1）。这排除了这些请求仅因预留块太大而失败，
+尚未测出精确 map 上界。
+
 ## Networking：编译后沙箱应用
 
 `runtime-confirmed via networking-crash.ips`：PC `0x1aa4401a8`；减去
@@ -66,7 +72,12 @@ FATAL: Could not allocate gigacage memory with maxAlignment = %lu, totalSize = %
 %s: Could not apply compiled sandbox: %s
 ```
 
-具体沙箱 API、传入配置以及内核拒绝原因仍需核对。这与 WebContent 的
+`RE-confirmed via WebKit+0x1a2f97ec0`：调用的 stub 位于
+`0x1a37a3ba0`；实际 Mach-O 的 indirect symbol table 将它解析为
+`_sandbox_apply`。返回值非零即跳到上述终止路径。
+`libsandbox.1.dylib+0x183c7bb84` 根据传入 profile 的字段选择 kernel
+policy operation 0 或 1，再提交 profile。具体传入配置、errno 和内核
+拒绝原因仍需核对。这与 WebContent 的
 地址预留失败是两个待解决问题，不能用关闭其中一个检查代替修复。
 
 ## 证据和回滚副本
