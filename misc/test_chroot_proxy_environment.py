@@ -22,6 +22,44 @@ class ChrootProxyEnvironment(unittest.TestCase):
     def test_real_canonical_path_and_all_failures(self):
         self.compile_and_run(ROOT / "misc/test_chroot_proxy_environment.c")
 
+    def test_settings_credentials_match_desktop_and_stop_on_failure(self):
+        source = (ROOT / "ViewBridgeChrootProxy/main.c").read_text()
+        start = source.index('    if (isSettingsExtension) {',
+                             source.index('MACWS_SYS_chroot, MACWS_ROOTFS'))
+        block = source[start:source.index('    (void)MacWSSyscall3', start)]
+        fixture = r'''
+#include <assert.h>
+#include <setjmp.h>
+#include <stdint.h>
+#define MACWS_SYS_setgid 181
+#define MACWS_SYS_setuid 23
+static jmp_buf failed;
+static int calls, failAt;
+static long MacWSSyscall1(long number, const void *argument) {
+    assert((uintptr_t)argument == 0);
+    assert(number == (calls == 0 ? MACWS_SYS_setgid : MACWS_SYS_setuid));
+    calls++;
+    return calls == failAt ? 1 : 0;
+}
+static void MacWSExit(int code) { longjmp(failed, code); }
+static void transition(int isSettingsExtension) {
+/* TRANSITION */
+}
+int main(void) {
+    transition(0); assert(calls == 0);
+    transition(1); assert(calls == 2);
+    for (int failure = 1; failure <= 2; failure++) {
+        calls = 0; failAt = failure;
+        int result = setjmp(failed);
+        if (!result) { transition(1); assert(0); }
+        assert(result == (failure == 1 ? 114 : 115));
+        assert(calls == failure);
+    }
+    return 0;
+}
+'''
+        self.compile_and_run(fixture.replace('/* TRANSITION */', block), stdin=True)
+
     def test_actual_production_environment_builder(self):
         source = (ROOT / "ViewBridgeChrootProxy/main.c").read_text()
         key_function = source.split("static int MacWSHasEnvironmentKey(", 1)[1]

@@ -1,7 +1,8 @@
 # Sonoma 设置面板：2026-10-03 实机证据
 
 设备：iPad13,4，iPadOS 17.0 21A329，Sonoma 14.0 23A344。
-设置右侧空白仍未通过验收；下面只记录已经确认的启动障碍。
+外观、通用、辅助功能、桌面与 Dock 已有真实内容。托管控件的直接输入
+仍需修复，不能把所有设置功能标为完成。
 
 ## chroot 内的可执行路径
 
@@ -36,10 +37,32 @@ Sandbox: hook..execve() killing com.apple.Appearance-Settings.extension[pid=8678
 报告没有具体 API misuse 字符串，也没有调用前目标 UID；
 不能据此断言是哪一个条件触发。
 
-THEORY：root 桌面与 carrier 降为 UID 501 的身份差异可能参与失败。
-仅 Appearance carrier 的 UID 对照诊断已保存原始二进制及权限。
-锁屏阻止运行验证，现已恢复原始 carrier，诊断副本保存在同一备份目录；
-解锁后再进行运行和可见面板验证。没有跳过 libxpc 检查。
+`runtime-confirmed via appearance-root-retry.log / settings-root-host.log`：
+仅 Appearance 改为 root 后没有重现上述崩溃；主进程报告：
+
+```text
+Received remote view controller: <_EXRemoteViewController: 0x117e54170>
+EXHostViewController: Will try to call delegate 0x13b6bd3e0 'hostViewController:didBeginHosting:' for session: <_EXHostViewControllerSession: 0x116cf5b90>
+```
+
+`appearance-root-final.png` 显示完整 Appearance 控件。
+正式配置现在使设置扩展与 root 桌面身份一致，没有跳过 libxpc 检查。
+运行时 schema 升为 v3，旧移动身份的标记不能满足准备检查。
+
+批量准备日志 `settings-runtime-v3.log` 完成 50 个面板；运行时验证扫描
+253 个镜像，通过签名、当前 trustcache 和注册检查。
+`batch-general.png`、`batch-accessibility.png`、`batch-desktop-dock.png`
+分别显示通用、辅助功能、桌面与 Dock 的真实内容。
+
+## 托管控件输入
+
+`runtime-confirmed via batch-purple.png / settings-global-purple.png`：
+向设置主进程发送精确窗口点击未改变强调色；同一位置经过已授权
+OSXvnc 的 WindowServer 输入通道后，强调色和高亮颜色均变为 Purple。
+这确认输入路径差异，尚未确认是目标窗口路由还是调用进程的 TCC 权限。
+
+Appearance 和设置主进程仍报告 `com.apple.windowmanager.server` 连接失败。
+既然面板实际托管和显示成功，不能把此错误直接归因为空白界面的原因。
 
 本地完整证据位于 `tmp/sonoma-14.0/priority-20261003/`。
 单个 carrier 的回滚副本位于设备

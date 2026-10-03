@@ -328,18 +328,14 @@ int main(int argc, char *argv[], char *envp[]) {
     if (MacWSSyscall1(MACWS_SYS_chroot, MACWS_ROOTFS) != 0) MacWSExit(111);
     if (MacWSSyscall1(MACWS_SYS_chdir, "/") != 0) MacWSExit(112);
     if (isSettingsExtension) {
-        // The proxy is setuid-root only so this first image can cross the
-        // chroot boundary.  RunningBoard created the extension job for the
-        // mobile host and iPadOS container setup is performed at exec time;
-        // leaving euid 0 here makes the kernel reject that mobile container.
-        // Drop every saved/effective credential before the real extension
-        // image is admitted, while retaining the one-shot XPC environment.
-        // Do not generalize this to ViewBridge/HIServices: a runtime A/B on
-        // 2026-08-04 showed that mobile ViewBridge cannot look up the root
-        // WindowServer session and exits 2 before publishing its listener.
-        if (MacWSSyscall1(MACWS_SYS_setgid, (const void *)501) != 0)
+        // Match the root desktop session, including saved credentials.
+        // Runtime A/B on Sonoma: uid 501 hit xpc_connection_set_target_uid
+        // misuse; uid 0 completed remote-view hosting and rendered Appearance.
+        // The earlier exec ENOENT was fixed by the chroot path alias, not by
+        // dropping to mobile. Preserve the one-shot launchd XPC environment.
+        if (MacWSSyscall1(MACWS_SYS_setgid, (const void *)0) != 0)
             MacWSExit(114);
-        if (MacWSSyscall1(MACWS_SYS_setuid, (const void *)501) != 0)
+        if (MacWSSyscall1(MACWS_SYS_setuid, (const void *)0) != 0)
             MacWSExit(115);
     }
     (void)MacWSSyscall3(MACWS_SYS_execve, target, targetArguments,

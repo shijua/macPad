@@ -94,6 +94,13 @@ class SettingsVerification(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'signature changed'):
             self.verify()
 
+    def test_previous_mobile_runtime_marker_requires_repair(self):
+        marker = self.frameworks / '.macws-settings-runtime'
+        marker.write_text(marker.read_text().replace(settings.SCHEMA,
+                         'macws-settings-extension-runtime-v2'))
+        with self.assertRaises(ValueError):
+            self.verify()
+
     def test_missing_executable_name_requires_unique_image(self):
         info = plistlib.loads(self.info.read_bytes())
         info.pop('CFBundleExecutable')

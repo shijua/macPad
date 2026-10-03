@@ -23,7 +23,7 @@ SETTINGS_PLUGINS = ROOTFS + '/System/Applications/System Settings.app/Contents/P
 BASE = ['/var/jb/usr/macOS/lib/libmachook.dylib',
         '/var/jb/usr/lib/libellekit.dylib',
         ROOTFS + '/usr/lib/libobjc-trampolines.dylib']
-SCHEMA = 'macws-settings-extension-runtime-v2'
+SCHEMA = 'macws-settings-extension-runtime-v3'
 MANIFEST = ROOTFS + '/var/db/macws/settings-runtime/hashes.json'
 CARRIER_ROOT = '/var/jb/Applications'
 
