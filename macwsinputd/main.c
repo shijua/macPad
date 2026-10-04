@@ -1904,14 +1904,11 @@ int main(void) {
                 fflush(stderr);
             }
         }
-        // WindowTargetAtPoint resolved both halves of the destination.  The
-        // per-process bridge reads its window identity from sceneID, so
-        // forwarding only the resolved PID silently turns a precise
-        // system-surface hit into window 0.  Runtime evidence on 2026-08-09:
-        // the broker resolved Mission Control's add-Space point as Dock
-        // 30658/window 71, while Dock received the same record as window 0.
-        // Preserve modifier bits while carrying the authoritative window.
-        if (eventTarget.windowID > 0 && exactWindowID == 0) {
+        // Normal fullscreen application records retain window zero: x/y are
+        // still desktop pixels, not pixels relative to the resolved window.
+        // System-surface posting requires its exact independently hit ID.
+        if (eventTarget.windowID > 0 && exactWindowID == 0 &&
+            (routedRecord.flags & MacWSInputFlagGlobalSystemSurface) != 0) {
             routedRecord.sceneID = MacWSInputSceneForWindow(
                 (uint32_t)eventTarget.windowID,
                 MacWSInputModifiersForScene(record.sceneID));

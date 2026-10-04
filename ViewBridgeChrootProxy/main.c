@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include "../include/macws_settings_paths.h"
 #include "../include/macws_chroot_environment.h"
+#include "../include/macws_app_input_socket.h"
 #if defined(MACWS_WEBKIT_PROXY_EXPERIMENT)
 #include "../include/macws_webkit_services.h"
 #endif
@@ -267,6 +268,7 @@ int main(int argc, char *argv[], char *envp[]) {
     static char temporaryDirectory[] = "TMPDIR=/tmp";
     static char nanoZone[] = "MallocNanoZone=0";
     static char rootEnvironment[MACWS_CHROOT_ROOT_ENV_SIZE];
+    static char inputSocketEnvironment[64];
 
     // Every entry route must establish the same real chroot namespace as
     // launchdchrootexec. Without it, CoreServices sees a host root parent and
@@ -302,11 +304,12 @@ int main(int argc, char *argv[], char *envp[]) {
             MacWSHasEnvironmentKey(*entry, "HOME") ||
             MacWSHasEnvironmentKey(*entry, "TMPDIR") ||
             MacWSHasEnvironmentKey(*entry, "MallocNanoZone") ||
+            MacWSHasEnvironmentKey(*entry, MACWS_APP_INPUT_FD_KEY) ||
             MacWSHasEnvironmentKey(*entry, MACWS_CHROOT_ROOT_KEY))
             continue;
-        // Five canonical values plus NULL remain. Reject an oversized launch
+        // Six canonical values, an optional input capability, and NULL remain. Reject an oversized launch
         // context instead of silently discarding trailing one-shot XPC data.
-        if (environmentCount + 6 >= MACWS_MAX_ENVIRONMENT) MacWSExit(119);
+        if (environmentCount + 7 >= MACWS_MAX_ENVIRONMENT) MacWSExit(119);
         targetEnvironment[environmentCount++] = *entry;
     }
     // Settings panes are sandboxed ExtensionKit processes.  They cannot fork,
@@ -337,6 +340,17 @@ int main(int argc, char *argv[], char *envp[]) {
             MacWSExit(114);
         if (MacWSSyscall1(MACWS_SYS_setuid, (const void *)0) != 0)
             MacWSExit(115);
+    }
+    // The stock DesktopSettings sandbox refuses bind() with EPERM. Create
+    // its explicit input capability in the native carrier before exec;
+    // libmachook verifies the descriptor's real name and type before use.
+    if (MacWSStringContains(target,
+            "/DesktopSettings.appex/Contents/MacOS/DesktopSettings")) {
+        unsigned pid = (unsigned)MacWSSyscall0(SYS_getpid);
+        if (!MacWSPreopenAppInputSocket(pid, inputSocketEnvironment,
+                                       MacWSCheckedSyscall3)) MacWSExit(120);
+        targetEnvironment[environmentCount++] = inputSocketEnvironment;
+        targetEnvironment[environmentCount] = (char *)0;
     }
     (void)MacWSSyscall3(MACWS_SYS_execve, target, targetArguments,
                         targetEnvironment);

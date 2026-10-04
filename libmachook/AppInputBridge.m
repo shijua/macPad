@@ -34,6 +34,8 @@
 #import "macws_stream_protocol.h"
 #import "MacWSCatalystInputPolicy.h"
 #import "MacWSInputLatency.h"
+#import "macws_app_input_eligibility.h"
+#import "macws_app_input_socket.h"
 
 typedef id (*MacWSMsgID)(id, SEL);
 typedef id (*MacWSMsgIDID)(id, SEL, id);
@@ -127,6 +129,9 @@ typedef void (*MacWSToggleFullScreen)(id, SEL, id);
 
 static int MacWSAppInputSocket = -1;
 static _Atomic int MacWSAppInputInstallState;
+// Preserve the syscall stage (high 16 bits) and real error (low 16 bits)
+// for read-only process diagnostics: socket=1, bind=2, pthread_create=3.
+static volatile _Atomic int MacWSAppInputInstallError;
 static char MacWSAppInputPath[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static char MacWSWindowMetricsPath[PATH_MAX];
 static NSData *MacWSLastWindowMetricsEntries;
@@ -680,6 +685,9 @@ static CFTypeRef MacWSAppInputGestureHitView;
 static double MacWSAppInputGestureHitValueBefore;
 static BOOL MacWSAppInputGestureHitHasValue;
 static MacWSSendEvent MacWSOriginalApplicationSendEvent;
+static BOOL (*MacWSOriginalMenuTrackingHandleEvent)(id, SEL, id);
+static void (*MacWSOriginalMenuTrackingRunLoop)(id, SEL, id);
+static void MacWSInstallMenuEventLoopWitness(void);
 static MacWSUnityDidSendEvent MacWSOriginalUnityDidSendEvent;
 static _Atomic uint64_t MacWSUnityMouseDiagnosticUntilMicros;
 static _Atomic uint64_t MacWSUnityMouseDiagnosticSequence;
@@ -1664,6 +1672,41 @@ static void MacWSInstallUnityDidSendEventDiagnostic(void) {
 // thread. Besides timing witnesses, this restores the double-click field on
 // the exact native down/up pair matched above; every unrelated event passes
 // through byte-for-byte unchanged.
+static BOOL MacWSCommitDeliveredMouseLocation(id event, CGPoint *point) {
+    if (!event) return NO;
+    NSUInteger type = ((MacWSMsgUInteger)objc_msgSend)(
+        event, sel_registerName("type"));
+    if (type < 1 || type > 7) return NO;
+    id window = ((MacWSMsgID)objc_msgSend)(event, sel_registerName("window"));
+    CGPoint local = ((MacWSMsgPoint)objc_msgSend)(
+        event, sel_registerName("locationInWindow"));
+    CGPoint screen = window ? ((MacWSMsgPointPoint)objc_msgSend)(
+        window, sel_registerName("convertPointToScreen:"), local) : local;
+    if (!isfinite(screen.x) || !isfinite(screen.y)) return NO;
+    MacWSAppInputPersistentMouseLocation = screen;
+    MacWSAppInputPersistentMouseLocationValid = YES;
+    if (point) *point = screen;
+    return YES;
+}
+
+static BOOL MacWSMenuTrackingHandleEvent(id self, SEL command, id event) {
+    // Sonoma's NSMenuTrackingSession dispatches its own real NSEvents. Keep
+    // the pointer witness coherent at that boundary, preserving the original
+    // event and the original BOOL handled result.
+    CGPoint screen;
+    if (MacWSCommitDeliveredMouseLocation(event, &screen)) {
+        if (MacWSAppInputMouseLocationActive)
+            MacWSAppInputMouseLocation = screen;
+        if (MacWSRuntimeDiagnosticsEnabled()) {
+            fprintf(stderr,
+                "#### APP-INPUT MENU-DELIVERY pid=%d screen=(%.2f,%.2f)\n",
+                getpid(), screen.x, screen.y);
+        }
+    }
+    return MacWSOriginalMenuTrackingHandleEvent
+        ? MacWSOriginalMenuTrackingHandleEvent(self, command, event) : NO;
+}
+
 static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
     MacWSInstallUnityDidSendEventDiagnostic();
     NSUInteger type = event ? ((MacWSMsgUInteger)objc_msgSend)(
@@ -1870,24 +1913,8 @@ static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
     // event also lets a later real mouse event replace the synthetic position;
     // it does not pin a bridge-only coordinate indefinitely.
     CGPoint deliveredMouseLocation = {0.0, 0.0};
-    BOOL hasDeliveredMouseLocation = NO;
-    if (type >= 1 && type <= 7 && event) {
-        id deliveredWindow = ((MacWSMsgID)objc_msgSend)(
-            event, sel_registerName("window"));
-        CGPoint deliveredLocal = ((MacWSMsgPoint)objc_msgSend)(
-            event, sel_registerName("locationInWindow"));
-        deliveredMouseLocation = deliveredWindow
-            ? ((MacWSMsgPointPoint)objc_msgSend)(
-                deliveredWindow, sel_registerName("convertPointToScreen:"),
-                deliveredLocal)
-            : deliveredLocal;
-        if (isfinite(deliveredMouseLocation.x) &&
-            isfinite(deliveredMouseLocation.y)) {
-            MacWSAppInputPersistentMouseLocation = deliveredMouseLocation;
-            MacWSAppInputPersistentMouseLocationValid = YES;
-            hasDeliveredMouseLocation = YES;
-        }
-    }
+    BOOL hasDeliveredMouseLocation =
+        MacWSCommitDeliveredMouseLocation(event, &deliveredMouseLocation);
 
     // A permitted hardware CGEvent also updates the pressed-button mask.
     // Our process-local route restores that invariant above, but AppKit's
@@ -2079,8 +2106,11 @@ static void MacWSScheduleApplicationKeyWitnessInstall(unsigned attempt) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
         MacWSInstallApplicationKeyWitness();
+        if (!MacWSMenuEventLoopHookCount && !MacWSOriginalMenuTrackingHandleEvent)
+            MacWSInstallMenuEventLoopWitness();
         if ((!MacWSOriginalApplicationSendEvent ||
-             !MacWSOriginalHandleActivatedEvent) && attempt < 19)
+             !MacWSOriginalHandleActivatedEvent ||
+             (!MacWSMenuEventLoopHookCount && !MacWSOriginalMenuTrackingHandleEvent)) && attempt < 19)
             MacWSScheduleApplicationKeyWitnessInstall(attempt + 1);
     });
 }
@@ -3132,7 +3162,7 @@ static BOOL MacWSAppInputSupportedProcess(void) {
     char executablePath[PATH_MAX] = {0};
     uint32_t executableCapacity = (uint32_t)sizeof(executablePath);
     if (_NSGetExecutablePath(executablePath, &executableCapacity) != 0 ||
-        !strstr(executablePath, ".app/Contents/MacOS/")) return NO;
+        !MacWSAppInputExecutableHasUILifecycle(executablePath)) return NO;
     // A finite application-name allowlist cannot cover Finder panels, menu
     // extras, newly installed GUI applications, or future Electron shells.
     // Install in every real AppKit application.  Chromium helpers are kept
@@ -3754,10 +3784,72 @@ static void MacWSMenuEventLoopWitness(id self, SEL command, BOOL track,
                           memory_order_release);
 }
 
+// Nested input delivery must preserve a menu loop's outer tracking interval.
+static void MacWSWithSynchronousInputTracking(void (^delivery)(void)) {
+    BOOL previous = atomic_exchange_explicit(
+        &MacWSAppInputSynchronousTrackingActive, YES, memory_order_acq_rel);
+    @try {
+        delivery();
+    } @finally {
+        atomic_store_explicit(&MacWSAppInputSynchronousTrackingActive,
+                              previous, memory_order_release);
+    }
+}
+
+// Keep tracking input on the queue consumed by the real Sonoma menu loop.
+static void MacWSMenuTrackingRunLoop(id self, SEL command, id mode) {
+    // A newly opened menu owns a new window. Let its first main-loop input
+    // publish that window before the socket thread uses a direct snapshot.
+    pthread_mutex_lock(&MacWSAppInputRouteLock);
+    MacWSClearMenuContextLocked();
+    pthread_mutex_unlock(&MacWSAppInputRouteLock);
+    MacWSWithSynchronousInputTracking(^{
+        MacWSOriginalMenuTrackingRunLoop(self, command, mode);
+    });
+}
+
 static void MacWSInstallMenuEventLoopWitness(void) {
     SEL selector = sel_registerName("_doMenuEventLoop:inMode:");
     Class baseClass = objc_getClass("NSMenuPresentationInstance");
     if (!baseClass) {
+        // RE-confirmed in 23A344 AppKit at 0x18430de80: handleEvent:
+        // dispatches x2's event and returns its handled BOOL in w0. Unlike
+        // Ventura's presentation class, this is Sonoma's event boundary.
+        Class session = objc_getClass("NSMenuTrackingSession");
+        // Scope this entry hook to the verified hosted DesktopSettings path.
+        // Swizzling this method did not intercept the observed direct call.
+        const char *program = MacWSAppInputProgramName();
+        Method loop = session ? class_getInstanceMethod(session,
+            sel_registerName("startRunningMenuEventLoop:")) : NULL;
+        const char *loopTypes = loop ? method_getTypeEncoding(loop) : NULL;
+        if (program && !strcmp(program, "DesktopSettings") &&
+            !MacWSOriginalMenuTrackingRunLoop && loopTypes &&
+            !strcmp(loopTypes, "v24@0:8@16")) {
+            void (*hook)(void *, void *, void **) =
+                dlsym(RTLD_DEFAULT, "MSHookFunction");
+            if (hook) {
+                IMP implementation = method_getImplementation(loop);
+                hook(ptrauth_strip((void *)implementation, ptrauth_key_function_pointer),
+                     (void *)MacWSMenuTrackingRunLoop,
+                     (void **)&MacWSOriginalMenuTrackingRunLoop);
+            }
+        }
+        Method handle = session ? class_getInstanceMethod(
+            session, sel_registerName("handleEvent:")) : NULL;
+        const char *handleTypes = handle ? method_getTypeEncoding(handle) : NULL;
+        if (handleTypes && !strcmp(handleTypes, "B24@0:8@16")) {
+            IMP implementation = method_getImplementation(handle);
+            if (implementation != (IMP)MacWSMenuTrackingHandleEvent) {
+                MacWSOriginalMenuTrackingHandleEvent =
+                    (BOOL (*)(id, SEL, id))implementation;
+                method_setImplementation(handle, (IMP)MacWSMenuTrackingHandleEvent);
+            }
+            if (MacWSRuntimeDiagnosticsEnabled())
+                fprintf(stderr,
+                    "#### APP-INPUT MENU-TRACK-WITNESS Sonoma types=%s\n",
+                    handleTypes);
+            return;
+        }
         fprintf(stderr,
                 "#### APP-INPUT MENU-TRACK-WITNESS unavailable "
                 "base=NO\n");
@@ -9875,7 +9967,16 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
                     application, hoverEvent, 0);
             }
         }
-        if (activeMenuPresentation && routedToTransientWindow) {
+        BOOL sonomaMenuLoop = MacWSOriginalMenuTrackingRunLoop &&
+            atomic_load_explicit(&MacWSAppInputSynchronousTrackingActive,
+                                 memory_order_acquire);
+        if ((activeMenuPresentation && routedToTransientWindow) ||
+            sonomaMenuLoop) {
+            pthread_mutex_lock(&MacWSAppInputRouteLock);
+            MacWSCacheMenuContextLocked(
+                application, eventClass, windowNumber, inputMappingFrame,
+                screenFrame, screenPoint, windowPoint, NO);
+            pthread_mutex_unlock(&MacWSAppInputRouteLock);
             // NSMenuPresentationInstance owns a nested nextEvent loop and does
             // not receive mouse input through NSApplication.sendEvent:. Put a
             // complete down/up pair in its real queue in chronological order.
@@ -9904,15 +10005,13 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         pthread_mutex_unlock(&MacWSAppInputRouteLock);
         MacWSAppInputRFBTrackingActive = YES;
         MacWSAppInputRFBTrackingButtons = secondary ? 2u : 1u;
-        atomic_store_explicit(&MacWSAppInputSynchronousTrackingActive, YES,
-                              memory_order_release);
-        ((MacWSPostEvent)objc_msgSend)(application,
-            sel_registerName("postEvent:atStart:"), upEvent, YES);
-        ((MacWSSendEvent)objc_msgSend)(application,
-            sel_registerName("sendEvent:"), event);
-        MacWSCompletePrequeuedAtomicUp(application, upEvent, upType);
-        atomic_store_explicit(&MacWSAppInputSynchronousTrackingActive, NO,
-                              memory_order_release);
+        MacWSWithSynchronousInputTracking(^{
+            ((MacWSPostEvent)objc_msgSend)(application,
+                sel_registerName("postEvent:atStart:"), upEvent, YES);
+            ((MacWSSendEvent)objc_msgSend)(application,
+                sel_registerName("sendEvent:"), event);
+            MacWSCompletePrequeuedAtomicUp(application, upEvent, upType);
+        });
         MacWSAppInputRFBTrackingActive = NO;
         MacWSAppInputRFBTrackingButtons = 0;
         MacWSRecordInputLatency(record, latencyMainStart,
@@ -11756,6 +11855,37 @@ static void MacWSInstallCoreDragNativeBridge(void) {
     }
 }
 
+static int MacWSInheritedAppInputSocket(const char *expectedPath) {
+    const char *value = getenv(MACWS_APP_INPUT_FD_KEY);
+    if (!value || !*value) return -1;
+    char *end = NULL;
+    errno = 0;
+    long descriptor = strtol(value, &end, 10);
+    BOOL validDescriptor = !errno && end && !*end &&
+        descriptor >= 3 && descriptor <= INT_MAX;
+    unsetenv(MACWS_APP_INPUT_FD_KEY);
+    if (!validDescriptor) return -1;
+    struct sockaddr_un address = {0};
+    socklen_t length = sizeof(address);
+    int type = 0;
+    socklen_t typeLength = sizeof(type);
+    int fd = (int)descriptor;
+    if (getsockname(fd, (struct sockaddr *)&address, &length) != 0 ||
+        address.sun_family != AF_UNIX ||
+        length > sizeof(address) ||
+        strnlen(address.sun_path, sizeof(address.sun_path)) ==
+            sizeof(address.sun_path) ||
+        strcmp(address.sun_path, expectedPath) != 0 ||
+        getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &typeLength) != 0 ||
+        type != SOCK_DGRAM) return -1;
+    int flags = fcntl(fd, F_GETFD);
+    if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 static void MacWSInstallAppInputBridgeNow(void) {
     if (!MacWSAppInputSupportedProcess()) return;
     if (MacWSRuntimeDiagnosticsEnabled()) {
@@ -11790,7 +11920,8 @@ static void MacWSInstallAppInputBridgeNow(void) {
         MacWSInstallTransientFrameConstraint();
         MacWSInstallFullscreenTransitionPrerequisite();
         if (!MacWSOriginalApplicationSendEvent ||
-            !MacWSOriginalHandleActivatedEvent)
+            !MacWSOriginalHandleActivatedEvent ||
+            (!MacWSMenuEventLoopHookCount && !MacWSOriginalMenuTrackingHandleEvent))
             MacWSScheduleApplicationKeyWitnessInstall(0);
         MacWSAppInputPending = [NSMutableArray new];
         MacWSAppInputDeferredRFBMoveEvents = [NSMutableArray new];
@@ -11800,8 +11931,13 @@ static void MacWSInstallAppInputBridgeNow(void) {
     snprintf(MacWSWindowMetricsPath, sizeof(MacWSWindowMetricsPath),
              "/private/tmp/macws_window_metrics.%d.bin", getpid());
     unlink(MacWSWindowMetricsPath);
-    MacWSAppInputSocket = socket(AF_UNIX, SOCK_DGRAM, 0);
+    MacWSAppInputSocket = MacWSInheritedAppInputSocket(MacWSAppInputPath);
+    BOOL inheritedSocket = MacWSAppInputSocket >= 0;
+    if (!inheritedSocket)
+        MacWSAppInputSocket = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (MacWSAppInputSocket < 0) {
+        atomic_store_explicit(&MacWSAppInputInstallError, (1 << 16) | errno,
+                              memory_order_release);
         atomic_store_explicit(&MacWSAppInputInstallState, 0,
                               memory_order_release);
         return;
@@ -11812,9 +11948,11 @@ static void MacWSInstallAppInputBridgeNow(void) {
     struct sockaddr_un address = {0};
     address.sun_family = AF_UNIX;
     strlcpy(address.sun_path, MacWSAppInputPath, sizeof(address.sun_path));
-    unlink(MacWSAppInputPath);
-    if (bind(MacWSAppInputSocket, (const struct sockaddr *)&address,
+    if (!inheritedSocket) unlink(MacWSAppInputPath);
+    if (!inheritedSocket && bind(MacWSAppInputSocket, (const struct sockaddr *)&address,
              sizeof(address)) != 0) {
+        atomic_store_explicit(&MacWSAppInputInstallError, (2 << 16) | errno,
+                              memory_order_release);
         close(MacWSAppInputSocket);
         MacWSAppInputSocket = -1;
         atomic_store_explicit(&MacWSAppInputInstallState, 0,
@@ -11823,7 +11961,10 @@ static void MacWSInstallAppInputBridgeNow(void) {
     }
     chmod(MacWSAppInputPath, 0600);
     pthread_t thread;
-    if (pthread_create(&thread, NULL, MacWSAppInputThread, NULL) == 0) {
+    int threadError = pthread_create(&thread, NULL, MacWSAppInputThread, NULL);
+    if (threadError == 0) {
+        atomic_store_explicit(&MacWSAppInputInstallError, 0,
+                              memory_order_release);
         pthread_detach(thread);
         if (!dockEndpoint) MacWSScheduleWindowMetricsPublish();
         atomic_store_explicit(&MacWSAppInputInstallState, 2,
@@ -11836,6 +11977,8 @@ static void MacWSInstallAppInputBridgeNow(void) {
             fflush(stderr);
         }
     } else {
+        atomic_store_explicit(&MacWSAppInputInstallError, (3 << 16) | threadError,
+                              memory_order_release);
         close(MacWSAppInputSocket);
         MacWSAppInputSocket = -1;
         unlink(MacWSAppInputPath);
