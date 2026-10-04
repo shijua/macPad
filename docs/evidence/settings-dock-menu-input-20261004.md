@@ -134,9 +134,14 @@ returns that exact class name. Its `synchronize` dispatch reaches
 CoreFoundation `0x187ffbd1c`; the first flag at source+0x82 sends execution
 to `0x187ffbd60`, returns zero, and clears that flag. A hardware watchpoint
 on source+0x82 catches `stlrb w25,[x8]` at `0x188043000` during the normal
-set-value path (`x22=0x41eb21a00`, `w25=1`). This is a dirty/change flag,
-**not evidence of an authorization rejection**. Do not bypass it or force
-synchronization success.
+set-value path (`x22=0x41eb21a00`, `w25=1`). The actual class ivar list,
+read from the matching Sonoma cache (`0x1db80f2b8`), names offset 130
+`_lastWriteFailed`, offset 125 `_volatile`, offset 126 `_readonly`, and
+offset 133 `_directMode`. The setter pessimistically marks failure while
+storing local changes; observing this assignment alone does **not establish
+an authorization rejection**. Do not bypass it or force synchronization
+success. An earlier dirty-flag interpretation was superseded by this actual
+ivar metadata.
 
 A diagnostic entitlement trial granted only
 `com.apple.security.temporary-exception.shared-preference.read-write` for
@@ -178,3 +183,39 @@ SETTINGS-VERIFY {"added": 0, "backend": "already-trusted", "cached": 200, "files
 
 This confirms installation consistency and menu input, not working Wi-Fi
 icon visibility or completion of the remaining app backlog.
+
+### Latest source state and standby boundary
+
+Runtime source bytes at PID 48776:
+
+```
+0x41eb21a78: 0xff 0xff 0xff 0xff 0x01 0x00 0x00 0x00
+0x41eb21a80: 0x00 0x01 0x00 0x01 0x00 0x00 0x00 0x00
+0x41eb21a70: 0x0000000000000000
+```
+
+Using the actual ivar metadata: userUID is UINT32_MAX, `_isByHost=1`,
+`_volatile=0`, `_readonly=0`, `_checkedInvalidHome=1`, `_directMode=0`,
+and accessPath is null. These may be deferred-initialization states in the
+daemon-backed source; **they do not prove a missing root identity**. A stock
+chroot `id -P root` resolves:
+
+```
+root:*:0:0::0:0:System Administrator:/var/root:/bin/sh
+```
+
+A second diagnostic trial added only the existing private OD libinfo and
+libinfo_v1 lookup names to this pane. It is **inconclusive**, because the
+next launch/UI sequence crossed standby:
+
+```
+2026-10-04 21:24:53.394 macwspowerd[62364:3681974] POWER suspended=76 total=76
+CAPTURE_EXIT 124
+```
+
+The original executable was restored from `ControlCenterSettings-before-libinfo`;
+no trial permission remains on disk. The runtime verifier again reports 50
+panes and 253 images already trusted. Next investigation should inspect the
+real source's `handleReply:toRequestNewDataMessage:onConnection:retryCount:error:`
+(Sonoma unslid IMP `0x1804c8fcc`) and its request routing, rather than forcing
+a synchronize return or treating the deferred fields as the cause.
