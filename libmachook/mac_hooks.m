@@ -21,6 +21,7 @@
 #include "macws_sonoma_resource_abi.h"
 #include "macws_display_profiles.h"
 #include "macws_tcc_connection.h"
+#include "macws_machine_architecture.h"
 #import <sys/mman.h>
 #import <sys/stat.h>
 #import <fcntl.h>
@@ -11420,8 +11421,19 @@ static int macws_real_sysctlbyname(const char *name, void *oldp,
     return sysctl(mib, (u_int)miblen, oldp, oldlenp, newp, newlen);
 }
 
+int sysctl_new(int *mib, u_int count, void *oldp, size_t *oldlenp,
+               void *newp, size_t newlen) {
+    int result;
+    if (MacWSReadMachineArchitecture(mib, count, oldp, oldlenp,
+                                     newp, newlen, &result)) return result;
+    return sysctl(mib, count, oldp, oldlenp, newp, newlen);
+}
+
 int sysctlbyname_new(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-    // printf("debugbydcmmc Calling interposed sysctlbyname\n");
+    if (name && strcmp(name, "hw.machine") == 0) {
+        int mib[] = {CTL_HW, HW_MACHINE};
+        return sysctl_new(mib, 2, oldp, oldlenp, newp, newlen);
+    }
     if (name && oldp) {
         if(!strcmp(name, "kern.osvariant_status")) {
             *(unsigned long long *)oldp = 0x70010000f388828b; // bit 0 = diagnostics enabled
@@ -14149,6 +14161,7 @@ static void macws_register_quicklook_image_thumbnail_repair(void) {
 }
 
 DYLD_INTERPOSE(sysctlbyname_new, sysctlbyname);
+DYLD_INTERPOSE(sysctl_new, sysctl);
 DYLD_INTERPOSE(LMGetBootDrive_new, LMGetBootDrive);
 DYLD_INTERPOSE(macws_CFURLCopyResourcePropertyValuesAndFlags,
                _CFURLCopyResourcePropertyValuesAndFlags);

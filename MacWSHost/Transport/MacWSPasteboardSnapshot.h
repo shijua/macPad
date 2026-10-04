@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 // Metadata is captured by UIKit on the main queue. Providers resolve promised
 // content asynchronously, so a slow producer cannot stop Host scene delivery.
@@ -16,8 +17,11 @@ static void MacWSLoadPasteboardSnapshot(
         [items addObject:item];
         for (NSString *type in provider.registeredTypeIdentifiers) {
             dispatch_group_enter(group);
-            [provider loadItemForTypeIdentifier:type options:nil
-                completionHandler:^(id<NSSecureCoding> value, NSError *error) {
+            // Promised text may be returned as a callback-scoped file URL
+            // by loadItem. Resolve its data representation while the provider
+            // owns that file, so text does not become an imported file path.
+            void (^resolved)(id<NSSecureCoding>, NSError *) =
+                ^(id<NSSecureCoding> value, NSError *error) {
                     dispatch_async(results, ^{
                         if (error || !value) {
                             if (!failure) failure = error ?: [NSError
@@ -27,7 +31,16 @@ static void MacWSLoadPasteboardSnapshot(
                         } else item[type] = value;
                         dispatch_group_leave(group);
                     });
-                }];
+                };
+            if ([[UTType typeWithIdentifier:type] conformsToType:UTTypeText]) {
+                [provider loadDataRepresentationForTypeIdentifier:type
+                    completionHandler:^(NSData *data, NSError *error) {
+                        resolved(data, error);
+                    }];
+            } else {
+                [provider loadItemForTypeIdentifier:type options:nil
+                    completionHandler:resolved];
+            }
         }
     }
     dispatch_group_notify(group, results, ^{
