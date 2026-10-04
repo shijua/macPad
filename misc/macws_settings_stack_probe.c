@@ -5,6 +5,7 @@
 // witnesses. No hooks, executable modifications, or memory writes.
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
+#include <mach-o/dyld_images.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -43,6 +44,29 @@ int main(int argc, const char **argv) {
     mach_msg_type_number_t count = 0;
     kr = task_threads(task, &threads, &count);
     if (kr != KERN_SUCCESS || !count) return 2;
+    // Read published metadata only; subscribing to dyld notifications can
+    // trip EXC_GUARD in this foreign chroot task.
+    task_dyld_info_data_t dyld = {0};
+    mach_msg_type_number_t dyldCount = TASK_DYLD_INFO_COUNT;
+    if (task_info(task, TASK_DYLD_INFO, (task_info_t)&dyld, &dyldCount) == KERN_SUCCESS) {
+        struct dyld_all_image_infos images = {0};
+        vm_size_t read = 0;
+        if (vm_read_overwrite(task, dyld.all_image_info_addr, sizeof(images),
+                (vm_address_t)&images, &read) == KERN_SUCCESS &&
+            read == sizeof(images) && images.infoArrayCount <= 2048) {
+            for (unsigned i = 0; i < images.infoArrayCount; ++i) {
+                struct dyld_image_info image = {0};
+                vm_address_t address = (vm_address_t)images.infoArray + i * sizeof(image);
+                if (vm_read_overwrite(task, address, sizeof(image),
+                        (vm_address_t)&image, &read) != KERN_SUCCESS || read != sizeof(image)) break;
+                char name[1024] = {0};
+                if (vm_read_overwrite(task, (vm_address_t)image.imageFilePath,
+                        sizeof(name)-1, (vm_address_t)name, &read) == KERN_SUCCESS)
+                    printf("image base=0x%llx path=%s\n",
+                           (unsigned long long)(uintptr_t)image.imageLoadAddress, name);
+            }
+        }
+    }
     thread_t main = MACH_PORT_NULL;
     uint64_t identifier = UINT64_MAX;
     for (unsigned i = 0; i < count; i++) {

@@ -87,8 +87,68 @@ com.apple.WebKit.Networking: Could not apply cached sandbox: Operation not suppo
 com.apple.WebKit.Networking: Could not apply compiled sandbox: Operation not supported
 ```
 
-这确认了应用失败的错误文本，尚未确认内核拒绝位置和 profile 格式。
+这次实验确认了应用失败的错误文本，当时尚未确认内核拒绝位置和 profile 格式。
 此次实验 job 已卸载，避免重复失败造成持续进程重启。
+
+## 2026-10-04：实际内核接口与内置配置
+
+`RE-confirmed via com.apple.security.sandbox UUID
+483EE0EF-E657-3EA7-91BA-324D3550643F`：策略配置引用字符串
+`0xfffffe00078ef8fd`（`Sandbox`）和 `0xfffffe00078edeeb`
+（`Seatbelt sandbox policy`），其 operations 表位于 `0xfffffe0007f24220`。
+`mpo_policy_syscall` 槽位 `0xfffffe0007f245c8` 的 chained pointer
+`0x8010fee303566294` 解析到 `0xfffffe000a56a294`。
+槽位偏移 `0x3a8` 与 [Apple XNU 10002.1.13 的 mac_policy.h](https://github.com/apple-oss-distributions/xnu/blob/xnu-10002.1.13/security/mac_policy.h)
+结构布局交叉核对一致。
+
+实际分发函数：
+
+```text
+0xfffffe000a56a2d4 mov w21, #0x2d
+0xfffffe000a56a2d8 cmp w1, #0x33
+0xfffffe000a56a2e0 sub w16, w1, #1
+0xfffffe000a56a2e4 cmp w16, #0x1c
+0xfffffe000a56a2e8 b.hi #0xfffffe000a56a4b0
+0xfffffe000a56a4b0 cmp w1, #0x2e
+0xfffffe000a56a4b4 b.ne #0xfffffe000a56aeb8
+0xfffffe000a56aed4 mov x0, x21
+```
+
+operation 0 因无符号减一进入上述默认返回路径，在解析用户配置之前
+返回 45。operation 1 的跳转表项进入 `0xfffffe000a56c180`，该函数
+复制 24 字节参数并按名称查找内置配置。不能将编译后配置的 operation 0
+直接修改成 1：参数格式不同，配置内容和权限也不同。
+
+`runtime-confirmed via sandbox-interface-probe.log`：独立原生 iOS
+探针（没有 libmachook）获得：
+
+```text
+operation=0 profile=(none) result=-1 errno=45
+operation=1 profile=com.apple.WebKit.Networking result=0 errno=0
+operation=1 profile=com.apple.WebKit.WebContent result=0 errno=0
+operation=1 profile=com.apple.no-such-macws-profile result=-1 errno=22
+```
+
+`runtime-confirmed via sandbox-permissions-probe.log`：每项测试都在新子进程
+中应用配置。之前临时文件创建、回环 SSH 端口连接和两个偏好服务查询均
+成功；应用 Networking/WebContent 配置后：
+
+```text
+after file-create=-1 errno=1
+after loopback-connect=-1 errno=1
+after lookup=com.apple.cfprefsd.daemon result=1100
+after lookup=com.apple.macosbooter.cfprefsd.daemon result=1100
+```
+
+应用不存在配置失败后，上述操作仍成功。这证实内置配置真正施加了限制，
+也说明无参数调用不能作为可用的 Networking 服务适配。
+读取实际 iPadOS Networking 可执行文件的签名，确认其内置配置名就是
+`com.apple.WebKit.Networking`，且有
+`com.apple.private.network.socket-delegate=true`。给探针仅补上该相同
+布尔权限后，结果没有改变；不能把增加该权限当成修复。
+
+`misc/macws_sandbox_interface_probe.c` 保留这个可复现测试，子进程有五秒
+截止时间。该诊断不修改任何运行中的服务，也没有发布返回成功的沙盒替代。
 
 ## 证据和回滚副本
 
