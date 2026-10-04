@@ -11170,7 +11170,7 @@ static void macws_install_target_feature_flag_compatibility(void) {
     NSString *path = @"/System/Library/FeatureFlags/Domain/ExtensionKit.plist";
     if ([NSFileManager.defaultManager fileExistsAtPath:path]) {
         macws_target_extension_features =
-            [NSDictionary dictionaryWithContentsOfFile:path];
+            [[NSDictionary alloc] initWithContentsOfFile:path];
         if (!macws_target_extension_features) {
             fprintf(stderr, "#### FEATUREFLAGS invalid target domain: %s\n",
                     path.fileSystemRepresentation);

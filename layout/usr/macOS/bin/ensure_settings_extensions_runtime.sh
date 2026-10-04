@@ -24,7 +24,7 @@ CARRIER_ENTITLEMENTS="/tmp/macws-settings-carrier-entitlements.$$"
 TRUST_MANIFEST=/var/jb/var/mobile/macws-settings-runtime.trust-hashes
 UICACHE_LIST=""
 TRUSTCACHE_INFO=""
-RUNTIME_SCHEMA="macws-settings-extension-runtime-v3"
+RUNTIME_SCHEMA="macws-settings-extension-runtime-v4"
 RUNTIME_BASE_FINGERPRINT=""
 RUNTIME_HOOK_HASH=""
 RUNTIME_SUBSTRATE_HASH=""
@@ -180,6 +180,46 @@ fresh_copy_if_changed() {
     mv -f "$temporary" "$destination"
 }
 
+prepare_local_hook() {
+    local frameworks="$1" destination temporary marker_schema marker_base marker_hook loads old
+    local marker_substrate marker_tramp marker_executable marker_carrier
+    local target='@loader_path/.jbroot/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate'
+    destination="$frameworks/libmachook.dylib"
+    if [ -f "$frameworks/.macws-settings-runtime" ] && [ -f "$destination" ]; then
+        IFS='|' read -r marker_schema marker_base marker_substrate marker_tramp \
+            marker_executable marker_carrier marker_hook _ < "$frameworks/.macws-settings-runtime"
+        loads=$($OTOOL -L "$destination") || return 1
+        if [ "$marker_schema" = "$RUNTIME_SCHEMA" ] &&
+           [ "$marker_base" = "$RUNTIME_HOOK_HASH" ] &&
+           [ "$(selected_cdhash "$destination")" = "$marker_hook" ] &&
+           printf '%s\n' "$loads" | grep -Fq "$target ("; then
+            trust_macho "$destination"
+            return 0
+        fi
+    fi
+    # Runtime-confirmed: the extension sandbox rejects the global dependency
+    # before libmachook's constructor runs. Load the provisioned bundle copy.
+    temporary="${destination}.new-$$"
+    cp "$LIBMACHOOK" "$temporary" || return 1
+    loads=$($OTOOL -L "$temporary") || return 1
+    old='/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate'
+    if ! printf '%s\n' "$loads" | grep -Fq "$old ("; then
+        old='@rpath/CydiaSubstrate.framework/CydiaSubstrate'
+        printf '%s\n' "$loads" | grep -Fq "$old (" || {
+            echo '[ERROR] Unknown Settings hook substrate dependency' >&2
+            rm -f "$temporary"
+            return 1
+        }
+    fi
+    /var/jb/usr/bin/install_name_tool -change "$old" "$target" "$temporary" || return 1
+    $LDID -S -M "$temporary" || return 1
+    $LDID -S -M "$temporary" || return 1
+    chmod 755 "$temporary" || return 1
+    chown root:wheel "$temporary" || return 1
+    mv -f "$temporary" "$destination" || return 1
+    trust_macho "$destination"
+}
+
 prepare_carrier() {
     local identifier="$1" carrier_identifier carrier_app carrier_executable
     local source_hash marker_hash temporary arch hash
@@ -305,8 +345,7 @@ prepare_extension() {
         "$frameworks/.jbroot/Library/Frameworks" \
         "$frameworks/.jbroot/Library/Frameworks/CydiaSubstrate.framework"
 
-    fresh_copy_if_changed "$LIBMACHOOK" "$frameworks/libmachook.dylib"
-    trust_macho "$frameworks/libmachook.dylib"
+    prepare_local_hook "$frameworks"
 
     substrate_local="$frameworks/.jbroot/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
     if [ ! -f "$substrate_local" ] ||
@@ -453,7 +492,7 @@ repair_dependency_runtime() {
     local candidate_path marker_schema marker_base_hook marker_base_substrate
     local marker_base_tramp marker_executable marker_carrier marker_hook
     local marker_substrate marker_tramp marker_extra substrate_local
-    local output local_substrate_hash="" repaired_count=0 hash=""
+    local output local_substrate_hash="" local_hook_hash="" repaired_count=0 hash=""
 
     ensure_trust_hash "$RUNTIME_HOOK_HASH" || return 1
     ensure_trust_hash "$RUNTIME_TRAMPOLINES_HASH" || return 1
@@ -505,8 +544,9 @@ repair_dependency_runtime() {
             [ -n "$marker_substrate" ] && [ -n "$marker_tramp" ] || return 1
 
         mkdir -p "$frameworks"
-        fresh_copy_if_changed \
-            "$LIBMACHOOK" "$frameworks/libmachook.dylib" || return 1
+        prepare_local_hook "$frameworks" || return 1
+        local_hook_hash=$(selected_cdhash "$frameworks/libmachook.dylib")
+        [ -n "$local_hook_hash" ] || return 1
         fresh_copy_if_changed \
             "$TRAMPOLINES" "$frameworks/libobjc-trampolines.dylib" || return 1
 
@@ -526,13 +566,13 @@ repair_dependency_runtime() {
         fi
 
         for hash in "$marker_executable" "$marker_carrier" \
-                    "$RUNTIME_HOOK_HASH" "$local_substrate_hash" \
+                    "$local_hook_hash" "$local_substrate_hash" \
                     "$RUNTIME_TRAMPOLINES_HASH"; do
             ensure_trust_hash "$hash" || return 1
         done
         printf '%s|%s|%s|%s|%s|%s\n' \
             "$RUNTIME_BASE_FINGERPRINT" "$marker_executable" \
-            "$marker_carrier" "$RUNTIME_HOOK_HASH" \
+            "$marker_carrier" "$local_hook_hash" \
             "$local_substrate_hash" "$RUNTIME_TRAMPOLINES_HASH" > \
             "$runtime_marker" || return 1
         chmod 0644 "$runtime_marker" || return 1

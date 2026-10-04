@@ -11,6 +11,8 @@ import unittest
 from unittest.mock import patch
 
 from test_boot_trust import macho, directory, trust, ROOT
+from test_macho_dependencies import deps, image
+import struct
 
 sys.modules['macws_boot_trust'] = trust
 SPEC = importlib.util.spec_from_file_location('settings_verify',
@@ -47,6 +49,12 @@ class SettingsVerification(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(macho())
             path.chmod(0o755)
+        hook = bytearray(macho())
+        command = image(['@loader_path/.jbroot/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate'])[32:]
+        struct.pack_into('<II', hook, 16, 2, 16 + len(command))
+        struct.pack_into('<I', hook, 40, 48 + len(command))
+        hook[48:48] = command
+        self.dependencies[2].write_bytes(hook)
         self.dependencies[1].chmod(0o4755)
         records, _, _ = trust.scan([str(path) for path in self.base + self.dependencies], {})
         marker = [settings.SCHEMA] + [settings.selected(records, str(path))
@@ -77,7 +85,18 @@ class SettingsVerification(unittest.TestCase):
     def test_changed_dependency_rejected_even_same_boot(self):
         self.verify()
         self.dependencies[2].write_bytes(macho(codes=[directory(1)]))
-        with self.assertRaisesRegex(ValueError, 'signature changed'):
+        with self.assertRaisesRegex(ValueError, 'signature changed|bundle-local substrate'):
+            self.verify()
+
+    def test_global_substrate_dependency_rejected(self):
+        self.dependencies[2].write_bytes(image([
+            '/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate']))
+        with self.assertRaisesRegex(ValueError, 'bundle-local substrate'):
+            self.verify()
+
+    def test_missing_substrate_dependency_rejected(self):
+        self.dependencies[2].write_bytes(image())
+        with self.assertRaisesRegex(ValueError, 'bundle-local substrate'):
             self.verify()
 
     def test_current_registration_required(self):
@@ -91,7 +110,7 @@ class SettingsVerification(unittest.TestCase):
 
     def test_marker_and_base_dependency_must_match(self):
         self.base[0].write_bytes(macho(codes=[directory(1)]))
-        with self.assertRaisesRegex(ValueError, 'signature changed'):
+        with self.assertRaisesRegex(ValueError, 'signature changed|bundle-local substrate'):
             self.verify()
 
     def test_previous_mobile_runtime_marker_requires_repair(self):

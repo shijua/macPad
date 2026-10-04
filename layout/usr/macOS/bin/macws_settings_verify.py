@@ -16,6 +16,7 @@ import sys
 import time
 
 import macws_boot_trust as trust
+import macws_macho_dependencies as macho_dependencies
 
 ROOTFS = '/var/mnt/rootfs'
 EXTENSIONS = ROOTFS + '/System/Library/ExtensionKit/Extensions'
@@ -23,7 +24,7 @@ SETTINGS_PLUGINS = ROOTFS + '/System/Applications/System Settings.app/Contents/P
 BASE = ['/var/jb/usr/macOS/lib/libmachook.dylib',
         '/var/jb/usr/lib/libellekit.dylib',
         ROOTFS + '/usr/lib/libobjc-trampolines.dylib']
-SCHEMA = 'macws-settings-extension-runtime-v3'
+SCHEMA = 'macws-settings-extension-runtime-v4'
 MANIFEST = ROOTFS + '/var/db/macws/settings-runtime/hashes.json'
 CARRIER_ROOT = '/var/jb/Applications'
 
@@ -63,6 +64,15 @@ def selected(records, path):
     raise ValueError('missing signed arm64 image: ' + path)
 
 
+def verify_local_hook(path):
+    with open(path, 'rb') as stream:
+        loads = macho_dependencies.load_commands(stream, os.fstat(stream.fileno()).st_size)['loads']
+    substrate = [name for name in loads if 'CydiaSubstrate.framework/' in name]
+    expected = '@loader_path/.jbroot/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate'
+    if substrate != [expected]:
+        raise ValueError('Settings hook must load bundle-local substrate: ' + path)
+
+
 def verify():
     began = time.monotonic()
     paths, panes = list(BASE), []
@@ -98,6 +108,7 @@ def verify():
             marker = stream.read(1024).strip().split('|')
         if len(marker) != 9 or marker[0] != SCHEMA:
             raise ValueError('invalid Settings runtime marker: ' + identifier)
+        verify_local_hook(frameworks + '/libmachook.dylib')
         paths.extend(dependencies)
         panes.append((identifier, dependencies, marker))
     if not panes:
