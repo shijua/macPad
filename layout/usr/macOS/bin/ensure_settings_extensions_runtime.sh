@@ -12,6 +12,7 @@ TRAMPOLINES="$ROOTFS/usr/lib/libobjc-trampolines.dylib"
 MACHO_PATCHER=/var/jb/usr/macOS/bin/set_macos_version.py
 LOAD_PATCHER=/var/jb/usr/macOS/bin/add_macho_load_dylib.py
 SETTINGS_ENT=/var/jb/usr/macOS/bin/settings-extension-entitlements.plist
+SETTINGS_CAPABILITIES=/var/jb/usr/macOS/bin/macws_settings_capabilities.py
 EXEC_ALIAS=/var/jb/usr/macOS/bin/macws_chroot_exec_alias.py
 LDID=/var/jb/usr/bin/ldid
 JBCTL=/var/jb/usr/bin/jbctl
@@ -35,7 +36,8 @@ if [ ! -d "$EXTENSIONS_ROOT" ]; then
     exit 0
 fi
 for required in "$LIBMACHOOK" "$SUBSTRATE" "$TRAMPOLINES" \
-                "$MACHO_PATCHER" "$LOAD_PATCHER" "$SETTINGS_ENT" "$EXEC_ALIAS"; do
+                "$MACHO_PATCHER" "$LOAD_PATCHER" "$SETTINGS_ENT" "$EXEC_ALIAS" \
+                "$SETTINGS_CAPABILITIES"; do
     if [ ! -f "$required" ]; then
         echo "[ERROR] Settings extension runtime prerequisite missing: $required" >&2
         exit 1
@@ -386,6 +388,10 @@ prepare_extension() {
         $LDID -I"$identifier" -S"$SETTINGS_ENT" -M "$executable"
         $LDID -I"$identifier" -S"$SETTINGS_ENT" -M "$executable"
     fi
+    if [ "$identifier" = 'com.apple.Desktop-Settings.extension' ]; then
+        /var/jb/usr/bin/python3 "$SETTINGS_CAPABILITIES" --repair \
+            "$identifier" "$executable"
+    fi
     trust_macho "$executable"
     carrier_app="/var/jb/Applications/MacWSSettingsExtension-$identifier.app"
     carrier_executable="$carrier_app/SettingsExtensionProxy"
@@ -441,6 +447,10 @@ verify_current_runtime() {
         fi
         [ -n "$identifier" ] && [ -n "$executable_name" ] || return 1
         executable="$contents/MacOS/$executable_name"
+        if [ "$identifier" = 'com.apple.Desktop-Settings.extension' ]; then
+            /var/jb/usr/bin/python3 "$SETTINGS_CAPABILITIES" --verify \
+                "$identifier" "$executable" || return 1
+        fi
         frameworks="$contents/Frameworks"
         carrier_app="/var/jb/Applications/MacWSSettingsExtension-$identifier.app"
         carrier_executable="$carrier_app/SettingsExtensionProxy"
@@ -542,6 +552,13 @@ repair_dependency_runtime() {
         [ "$marker_schema" = "$RUNTIME_SCHEMA" ] && [ -z "$marker_extra" ] &&
             [ -n "$marker_executable" ] && [ -n "$marker_carrier" ] &&
             [ -n "$marker_substrate" ] && [ -n "$marker_tramp" ] || return 1
+
+        if [ "$identifier" = 'com.apple.Desktop-Settings.extension' ]; then
+            /var/jb/usr/bin/python3 "$SETTINGS_CAPABILITIES" --repair \
+                "$identifier" "$executable" || return 1
+            marker_executable=$(selected_cdhash "$executable")
+            [ -n "$marker_executable" ] || return 1
+        fi
 
         mkdir -p "$frameworks"
         prepare_local_hook "$frameworks" || return 1

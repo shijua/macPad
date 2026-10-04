@@ -17,6 +17,7 @@ import time
 
 import macws_boot_trust as trust
 import macws_macho_dependencies as macho_dependencies
+import macws_settings_capabilities as capabilities
 
 ROOTFS = '/var/mnt/rootfs'
 EXTENSIONS = ROOTFS + '/System/Library/ExtensionKit/Extensions'
@@ -86,6 +87,7 @@ def verify():
         if metadata is None:
             continue
         identifier, executable = metadata
+        capabilities.verify(identifier, executable)
         carrier_id = 'com.macwsguide.settings-extension-carrier.' + identifier
         carrier = CARRIER_ROOT + '/MacWSSettingsExtension-' + identifier + '.app'
         carrier_executable = carrier + '/SettingsExtensionProxy'

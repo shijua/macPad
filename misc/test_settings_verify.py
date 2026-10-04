@@ -15,6 +15,11 @@ from test_macho_dependencies import deps, image
 import struct
 
 sys.modules['macws_boot_trust'] = trust
+CAP_SPEC = importlib.util.spec_from_file_location('macws_settings_capabilities',
+    ROOT / 'layout/usr/macOS/bin/macws_settings_capabilities.py')
+capabilities = importlib.util.module_from_spec(CAP_SPEC)
+CAP_SPEC.loader.exec_module(capabilities)
+sys.modules['macws_settings_capabilities'] = capabilities
 SPEC = importlib.util.spec_from_file_location('settings_verify',
     ROOT / 'layout/usr/macOS/bin/macws_settings_verify.py')
 settings = importlib.util.module_from_spec(SPEC)

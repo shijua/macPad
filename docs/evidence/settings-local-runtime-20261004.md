@@ -60,11 +60,16 @@ Original scripts and four source/runtime libraries are preserved on-device in
 `/var/jb/var/mobile/sonoma-workspace-originals/settings-local-dependency-20261004/`.
 No authorization checks or failed setup calls are replaced with success.
 
-## Remaining Dock control effect
+## Historical Dock control failure
+
+The size and automatic-hide failure described below was subsequently fixed
+by the exact pane's Dock server lookup capability. See
+[runtime evidence and validation](settings-dock-rpc-permission-20261004.md).
+Position menu selection still needs validation.
 
 The actual UI slider and automatic-hide toggle change their displayed state,
 but `CoreDockGetTileSize`/`CoreDockGetAutoHideEnabled` still returned
-`0.4286`/`0` after those clicks. This remains unresolved.
+`0.4286`/`0` after those clicks. At that stage the failure remained unresolved.
 
 RE-confirmed via arm64e DesktopSettings: `+0x60564..+0x60580` loads its
 requested Double and calls wrapper `+0x5b5bc`. That wrapper boxes and
