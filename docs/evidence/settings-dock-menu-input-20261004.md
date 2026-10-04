@@ -8,10 +8,16 @@ Each final selection used one mouse tap; defaults readback and authentic
 DisplayStream pixels agreed. The final preference is Bottom.
 
 This verifies the DesktopSettings position menu, not every settings pane or
-Safari. Deployment during this investigation is restricted to the Desktop
-extension's local libmachook, its native carrier, and macwsinputd. The base
-runtime repair/install path still needs reconciliation before reboot durability
-can be claimed.
+Safari. The release runtime copies were updated after the menu regression:
+base arm64/arm64e libmachook, base native carrier, local Desktop carrier,
+and the 50 extension dependency copies. The actual verifier returned:
+
+```
+SETTINGS-VERIFY {"added": 0, "backend": "already-trusted", "cached": 200, "files": 253, "images": 253, "panes": 50, "resource_hits": 0, "total_seconds": 0.189}
+```
+
+A fresh chroot echo returned `menu-runtime-cli-ok`. A full device reboot was
+not performed; these checks establish installation-source consistency.
 
 ## Runtime evidence
 
