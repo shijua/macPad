@@ -11135,36 +11135,28 @@ static void macws_install_osxvnc_hooks(void) {
 
 extern void MacWSInstallExtensionRuntimeCompatibility(void);
 
-// Ventura 13.4 has no ExtensionKit feature-flag domain.  The chrooted image
-// nevertheless resolves libsystem_featureflags against iPadOS's already-live
-// feature state, whose /System/Library/FeatureFlags/Domain/ExtensionKit.plist
-// enables `automatically_sandbox_extensions` and
-// `prefer_inprocess_discovery`.  Runtime evidence from the real Ventura
-// ExtensionFoundation boundary is exact:
-//
-//   _EXDefaults.forceSandbox = 1
-//   _EXDiscoveryController canRunQuery:error: = 0
-//   _LSApplicationExtensionRecordEnumerator recordCount=1 matchCount=1
-//
-// The corresponding macOS rootfs originally has no ExtensionKit.plist at all,
-// while the outer iPadOS file explicitly sets these flags true.  Restore the
-// target OS's absent-domain/default-false semantics at the feature provider,
-// before ExtensionFoundation decides whether its legitimate LS records are
-// admissible.  This is not a query/check bypass: every stock query, extension
-// entitlement, LS match, and ExtensionKit launch remains responsible for its
-// own normal validation.
+// The feature provider sees the outer iPadOS state. Ventura has no target
+// ExtensionKit domain, but Sonoma ships an explicit domain. Read that target
+// configuration before installing the hook instead of disabling every flag.
 typedef bool (*macws_os_feature_enabled_impl_fn)(const char *, const char *);
 static macws_os_feature_enabled_impl_fn
     macws_os_feature_enabled_impl_orig = NULL;
+static NSDictionary *macws_target_extension_features = nil;
 static bool macws_os_feature_enabled_impl_compat(const char *domain,
                                                   const char *feature) {
-    if (domain && strcmp(domain, "ExtensionKit") == 0) {
+    if (domain && strcmp(domain, "ExtensionKit") == 0 && feature) {
+        NSString *key = [NSString stringWithUTF8String:feature];
+        NSDictionary *entry = key ? macws_target_extension_features[key] : nil;
+        id configured = [entry isKindOfClass:NSDictionary.class]
+            ? entry[@"Enabled"] : nil;
+        bool enabled = [configured isKindOfClass:NSNumber.class]
+            && [configured boolValue];
         if (getenv("MACWS_RUNTIME_DIAGNOSTICS")) {
             fprintf(stderr,
                     "#### FEATUREFLAGS target-macos domain=%s feature=%s "
-                    "enabled=0\n", domain, feature ?: "<nil>");
+                    "enabled=%d\n", domain, feature, enabled);
         }
-        return false;
+        return enabled;
     }
     return macws_os_feature_enabled_impl_orig
         ? macws_os_feature_enabled_impl_orig(domain, feature) : false;
@@ -11174,6 +11166,16 @@ static void macws_install_target_feature_flag_compatibility(void) {
     if (macws_os_feature_enabled_impl_orig) return;
     void *provider = dlsym(RTLD_DEFAULT, "_os_feature_enabled_impl");
     if (!provider) return;
+    NSString *path = @"/System/Library/FeatureFlags/Domain/ExtensionKit.plist";
+    if ([NSFileManager.defaultManager fileExistsAtPath:path]) {
+        macws_target_extension_features =
+            [NSDictionary dictionaryWithContentsOfFile:path];
+        if (!macws_target_extension_features) {
+            fprintf(stderr, "#### FEATUREFLAGS invalid target domain: %s\n",
+                    path.fileSystemRepresentation);
+            return;
+        }
+    }
     MSHookFunction(provider,
                    (void *)macws_os_feature_enabled_impl_compat,
                    (void **)&macws_os_feature_enabled_impl_orig);
