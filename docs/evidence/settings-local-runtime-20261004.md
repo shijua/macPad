@@ -59,3 +59,37 @@ Local logs/captures are under `tmp/sonoma-14.0/priority-20261003/`.
 Original scripts and four source/runtime libraries are preserved on-device in
 `/var/jb/var/mobile/sonoma-workspace-originals/settings-local-dependency-20261004/`.
 No authorization checks or failed setup calls are replaced with success.
+
+## Remaining Dock control effect
+
+The actual UI slider and automatic-hide toggle change their displayed state,
+but `CoreDockGetTileSize`/`CoreDockGetAutoHideEnabled` still returned
+`0.4286`/`0` after those clicks. This remains unresolved.
+
+RE-confirmed via arm64e DesktopSettings: `+0x60564..+0x60580` loads its
+requested Double and calls wrapper `+0x5b5bc`. That wrapper boxes and
+conditionally unboxes NSNumber via the Foundation Swift bridges, and only
+calls the real setter at `+0x5b610` if conversion supplied a value. Bool
+uses corresponding wrapper `+0x5ba0c`. No branch was bypassed.
+
+An independent actual chroot probe rules out a general Swift NSNumber bridge
+failure: Double 0.27 round-tripped with `accepted=1, absent=0`, and Bool true
+with `accepted=1, output=1`. That does not prove the wrapper ran inside the
+Settings extension.
+
+A separate real CoreDock RPC probe, signed with the exact DesktopSettings
+entitlement dictionary, returned:
+
+```text
+before size=0.4286 autohide=0
+set size result=0
+set autohide result=0
+after size=0.2679 autohide=1
+```
+
+The previous size was restored using the full float value (a truncated
+six-decimal value rounds down one Dock step); final getters returned
+`size=0.4286 autohide=0`. Thus adding the general hook entitlement set is
+not supported as the fix. The control's callback/notification path needs
+an in-process witness. A bounded native oslog subscription produced zero
+bytes; that is not evidence that the client made or completed its calls.
