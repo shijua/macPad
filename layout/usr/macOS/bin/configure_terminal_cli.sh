@@ -45,4 +45,5 @@ done
 if [ -d "$ROOTFS/usr/lib/zsh/5.9" ]; then
 	/var/jb/usr/bin/python3 /var/jb/usr/macOS/bin/macws_prepare_zsh_modules.py "$ROOTFS"
 fi
+bash "$(dirname -- "$0")/configure_code_cli.sh" "$ROOTFS"
 echo '[INFO] Terminal CLI and verified curl TLS profiles are installed'
