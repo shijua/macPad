@@ -48,12 +48,22 @@ verify_launchservices_database_for_desktop_repair
     def test_failed_live_catalog_rebuilds(self):
         self.assertIn("seed-called", self.run_repair(1))
 
-    def test_cold_session_always_uses_clean_seed_and_typed_verification(self):
+    def test_cold_session_uses_versioned_repair_and_typed_verification(self):
         seed = function("seed_launchservices_database")
-        self.assertIn("-kill -seed", seed)
+        self.assertIn("repair-launchservices-catalog", seed)
         self.assertIn("verify-launchservices-catalog", seed)
         self.assertNotIn("LAUNCHSERVICES_CATALOG_MARKER", seed)
         self.assertNotIn("launchservices_source_fingerprint", SOURCE)
+
+    def test_sonoma_repair_preserves_live_records(self):
+        source = (ROOT / "macwsworkspacectl/main.m").read_text()
+        repair = source.split("static int RepairLaunchServicesCatalog(void) {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("UsesSonomaCatalog()", repair)
+        self.assertIn("RegisterSonomaApplications() : CleanSeedLaunchServicesCatalog()", repair)
+        register = source.split("static int RegisterSonomaApplications(void) {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("LSRegisterURL", register)
+        self.assertNotIn("-kill", register)
+        self.assertIn("URLForApplicationWithBundleIdentifier", register)
 
 
 if __name__ == "__main__":

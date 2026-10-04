@@ -644,9 +644,47 @@ static int CleanSeedLaunchServicesCatalog(void) {
     return 0;
 }
 
+static BOOL UsesSonomaCatalog(void) {
+    NSDictionary *version = [NSDictionary dictionaryWithContentsOfFile:
+        @"/System/Library/CoreServices/SystemVersion.plist"];
+    return [version[@"ProductVersion"] integerValue] >= 14;
+}
+
+static int RegisterSonomaApplications(void) {
+    // Runtime-confirmed: Sonoma's Spotlight seed fails with -50 on this
+    // rootfs, while explicit bundle registration succeeds. Preserve the live
+    // database and repair fixed core records without another destructive seed.
+    NSArray<NSString *> *paths = @[
+        @"/System/Applications/Utilities/Terminal.app",
+        @"/System/Applications/System Settings.app",
+        @"/System/Library/CoreServices/Finder.app",
+        @"/System/Library/CoreServices/Dock.app",
+        @"/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app",
+        @"/Applications/Visual Studio Code.app",
+    ];
+    for (NSString *path in paths) {
+        if (![NSFileManager.defaultManager fileExistsAtPath:path]) continue;
+        NSURL *url = [NSURL fileURLWithPath:path isDirectory:YES];
+        NSString *identifier = [NSBundle bundleWithURL:url].bundleIdentifier;
+        NSURL *record = identifier.length ? [NSWorkspace.sharedWorkspace
+            URLForApplicationWithBundleIdentifier:identifier] : nil;
+        if ([record.path isEqualToString:path]) continue;
+        OSStatus status = LSRegisterURL((__bridge CFURLRef)url, true);
+        if (status != noErr) {
+            fprintf(stderr, "application-record-register-failed path=%s status=%d\n",
+                    path.fileSystemRepresentation, (int)status);
+            return 1;
+        }
+        fprintf(stdout, "application-record-registered path=%s\n",
+                path.fileSystemRepresentation);
+    }
+    return 0;
+}
+
 static int RepairLaunchServicesCatalog(void) {
-    int seedResult = CleanSeedLaunchServicesCatalog();
-    if (seedResult != 0) return seedResult;
+    int result = UsesSonomaCatalog()
+        ? RegisterSonomaApplications() : CleanSeedLaunchServicesCatalog();
+    if (result != 0) return result;
     int settingsResult = RegisterSettingsExtensions(NO);
     return settingsResult == 0 ? 0 : RegisterSettingsExtensions(YES);
 }

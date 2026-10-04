@@ -3656,18 +3656,13 @@ seed_launchservices_database() {
         return 1
     fi
     rm -f "$LOGDIR/lsregister.log"
-    # Each private lsd generation needs an authoritative rebuild: the session
-    # store is not retained across generations even when a source fingerprint
-    # is unchanged. The previous `-f -apps system,local,user` path appended
-    # records repeatedly:
-    # runtime evidence found a 148,717,568-byte store and a 50-60 second
-    # `_LSDatabaseClean` on every lsd launch.  Ventura's stock `-kill -seed`
-    # transaction produced a clean 6-10 MB store in 6 seconds on this device
-    # and immediately passed every application/ExtensionKit witness. Never
-    # substitute a stale marker for the real catalog verification below.
+    # The controller keeps Ventura's verified clean-seed route and repairs
+    # Sonoma's fixed core records individually. Sonoma's Spotlight-based
+    # seed fails on this rootfs; preserve existing app and plug-in records.
     log "Rebuilding the real macOS application catalog for this lsd generation..."
-    if ! "$CHROOTEXEC" 0 0 "$ROOTFS" "$LSREGISTER_BIN" \
-            -kill -seed > "$LOGDIR/lsregister.log" 2>&1; then
+    if ! MACWS_CATALOG_REGISTRATION=1 \
+            "$CHROOTEXEC" 0 0 "$ROOTFS" "$WORKSPACECTL_BIN" \
+            repair-launchservices-catalog > "$LOGDIR/lsregister.log" 2>&1; then
         log "ERROR: LaunchServices clean seed failed."
         tail -n 20 "$LOGDIR/lsregister.log" 2>/dev/null || true
         return 1
