@@ -3822,7 +3822,8 @@ static void MacWSInstallMenuEventLoopWitness(void) {
         Method loop = session ? class_getInstanceMethod(session,
             sel_registerName("startRunningMenuEventLoop:")) : NULL;
         const char *loopTypes = loop ? method_getTypeEncoding(loop) : NULL;
-        if (program && !strcmp(program, "DesktopSettings") &&
+        if (program && (!strcmp(program, "DesktopSettings") ||
+                        !strcmp(program, "ControlCenterSettings")) &&
             !MacWSOriginalMenuTrackingRunLoop && loopTypes &&
             !strcmp(loopTypes, "v24@0:8@16")) {
             void (*hook)(void *, void *, void **) =

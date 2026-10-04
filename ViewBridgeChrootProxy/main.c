@@ -344,8 +344,16 @@ int main(int argc, char *argv[], char *envp[]) {
     // The stock DesktopSettings sandbox refuses bind() with EPERM. Create
     // its explicit input capability in the native carrier before exec;
     // libmachook verifies the descriptor's real name and type before use.
-    if (MacWSStringContains(target,
-            "/DesktopSettings.appex/Contents/MacOS/DesktopSettings")) {
+    const char *desktopInputTarget =
+        "/System/Library/ExtensionKit/Extensions/DesktopSettings.appex/"
+        "Contents/MacOS/DesktopSettings";
+    const char *controlInputTarget =
+        "/System/Library/ExtensionKit/Extensions/ControlCenterSettings.appex/"
+        "Contents/MacOS/ControlCenterSettings";
+    if ((MacWSStringContains(target, desktopInputTarget) &&
+         MacWSStringContains(desktopInputTarget, target)) ||
+        (MacWSStringContains(target, controlInputTarget) &&
+         MacWSStringContains(controlInputTarget, target))) {
         unsigned pid = (unsigned)MacWSSyscall0(SYS_getpid);
         if (!MacWSPreopenAppInputSocket(pid, inputSocketEnvironment,
                                        MacWSCheckedSyscall3)) MacWSExit(120);

@@ -78,3 +78,32 @@ main-run-loop delivery publishes the new real window and queues its down/up.
 Failed extra sandbox entitlements were restored to the original signed
 DesktopSettings executable. No check-return bypass or synthetic image was
 used to obtain the successful menu selections.
+
+## ControlCenterSettings follow-up (selection pending)
+
+The real pane menu opened, but its process had no input socket:
+
+```
+ls: cannot access '/var/mnt/rootfs/private/tmp/macws_app_input.46871.sock': No such file or directory
+```
+
+The same input eligibility, native pre-open, and menu loop mechanism was
+scoped to the exact stock ControlCenterSettings executable. After native
+carrier/local hook replacement and a normal pane relaunch:
+
+```
+srw------- 1 root wheel 0 Oct  4 20:48 /var/mnt/rootfs/private/tmp/macws_app_input.47136.sock
+```
+
+Selection and menu-bar icon changes are **not verified**. The attempted test
+crossed the real standby transition:
+
+```
+2026-10-04 20:48:58.003 macwspowerd[62364:3650413] POWER suspended=65 total=65
+CAPTURE_EXIT 124
+```
+
+Awaiting device unlock/Host foreground before repeating the test. The
+ControlCenter extension change is still local; the base install/runtime
+source remains the verified DesktopSettings release until Control Center
+selection is actually checked. Existing Wi-Fi menu-bar visibility remains 1.

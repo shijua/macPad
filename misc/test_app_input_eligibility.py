@@ -20,6 +20,10 @@ int main(void) {
         "/System/Applications/System Settings.app/Contents/MacOS/System Settings"));
     assert(MacWSAppInputExecutableHasUILifecycle(
         "/System/Library/ExtensionKit/Extensions/DesktopSettings.appex/Contents/MacOS/DesktopSettings"));
+    assert(MacWSAppInputExecutableHasUILifecycle(
+        "/System/Library/ExtensionKit/Extensions/ControlCenterSettings.appex/Contents/MacOS/ControlCenterSettings"));
+    assert(!MacWSAppInputExecutableHasUILifecycle(
+        "/tmp/ControlCenterSettings.appex/Contents/MacOS/ControlCenterSettings"));
     assert(!MacWSAppInputExecutableHasUILifecycle(NULL));
     assert(!MacWSAppInputExecutableHasUILifecycle("/usr/bin/vim"));
     assert(!MacWSAppInputExecutableHasUILifecycle(
