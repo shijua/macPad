@@ -124,13 +124,11 @@ static const char *const kAudioOutputPlist =
 static const char *const kVSCodeURLSocket =
     "/var/mnt/rootfs" MACWS_VSCODE_URL_SOCKET_PATH;
 static const char *const kVSCodeExecutable =
-    "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
-// Current VS Code's bundle metadata names the thin launcher `Code`, while the
-// production launchd job intentionally runs the equivalent `Electron` entry
-// with MacWS's JIT/environment contract. Dock resolves CFBundleExecutable and
-// therefore presents this path to the generic launch boundary.
-static const char *const kVSCodeBundleExecutable =
     "/Applications/Visual Studio Code.app/Contents/MacOS/Code";
+// The official 1.140 bundle ships Code. Keep the legacy alias routable for
+// older installations, while production tracks the actual bundle executable.
+static const char *const kVSCodeBundleExecutable =
+    "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
 static const char *const kGeekbenchExecutable =
     "/Applications/Geekbench 6.app/Contents/MacOS/Geekbench 6";
 static const char *const kGeekbenchBackendExecutable =
@@ -1134,7 +1132,7 @@ static void AddStatus(xpc_object_t reply) {
     xpc_dictionary_set_bool(reply, "maps_available",
         access("/var/mnt/rootfs/System/Applications/Maps.app/Contents/MacOS/Maps", X_OK) == 0);
     xpc_dictionary_set_bool(reply, "vscode_available",
-        access("/var/mnt/rootfs/Applications/Visual Studio Code.app/Contents/MacOS/Electron", X_OK) == 0 &&
+        access("/var/mnt/rootfs/Applications/Visual Studio Code.app/Contents/MacOS/Code", X_OK) == 0 &&
         access(kVSCodePlist, R_OK) == 0);
     xpc_dictionary_set_bool(reply, "amadine_available", HasExecutableFileMode(
         "/var/mnt/rootfs/Applications/Amadine.app/Contents/MacOS/Amadine"));
@@ -3006,7 +3004,7 @@ static BOOL EnsureVSCodeAudioBridge(NSString **message) {
 
 static BOOL LaunchVSCode(NSString **message) {
     if (access(kVSCodePlist, R_OK) != 0 ||
-        access("/var/mnt/rootfs/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+        access("/var/mnt/rootfs/Applications/Visual Studio Code.app/Contents/MacOS/Code",
                X_OK) != 0) {
         *message = @"VS Code 或生产启动配置不存在";
         return NO;

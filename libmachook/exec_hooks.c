@@ -444,7 +444,10 @@ static bool vscode_shell_env_printer_request(
     const char *path, char *const argv[], char *const envp[], char token[13]) {
     static const char electron_suffix[] =
         "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
-    if (!path_has_suffix(path, electron_suffix) ||
+    static const char code_suffix[] =
+        "/Applications/Visual Studio Code.app/Contents/MacOS/Code";
+    if ((!path_has_suffix(path, electron_suffix) &&
+         !path_has_suffix(path, code_suffix)) ||
         !env_has_exact(envp, "VSCODE_RESOLVING_ENVIRONMENT=1") ||
         !env_has_exact(envp, "ELECTRON_RUN_AS_NODE=1")) {
         return false;

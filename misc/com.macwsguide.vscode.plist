@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Launch job for the UUID-locked arm64 Visual Studio Code build. -->
+    <!-- Launch job for the UUID-locked VS Code 1.140 arm64 build. -->
     <key>Label</key>
     <string>UIKitApplication:com.macwsguide.vscode</string>
     <key>ProgramArguments</key>
@@ -11,7 +11,7 @@
         <string>0</string>
         <string>0</string>
         <string>/var/mnt/rootfs</string>
-        <string>/Applications/Visual Studio Code.app/Contents/MacOS/Electron</string>
+        <string>/Applications/Visual Studio Code.app/Contents/MacOS/Code</string>
 		<!-- Keep this native-AGX profile isolated from the user's normal VS Code
 		     profile.  The packaged settings disable the stale AgentHost generation
 		     that runtime tracing tied to Chrome_IOThread's full-queue MOJO retry;
