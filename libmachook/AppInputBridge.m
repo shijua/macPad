@@ -11157,6 +11157,11 @@ static void *MacWSAppInputThread(void *unused) {
                                  &sourceAddressLength);
         if (count < 0) {
             if (errno == EINTR) continue;
+            int receiveError = errno;
+            fprintf(stderr,
+                    "#### APP-INPUT RECEIVE-EXIT pid=%d socket=%d errno=%d\n",
+                    getpid(), MacWSAppInputSocket, receiveError);
+            fflush(stderr);
             break;
         }
         // Dock deliberately has no AppKit objects. Its only accepted payload

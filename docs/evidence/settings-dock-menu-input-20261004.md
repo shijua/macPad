@@ -219,3 +219,34 @@ panes and 253 images already trusted. Next investigation should inspect the
 real source's `handleReply:toRequestNewDataMessage:onConnection:retryCount:error:`
 (Sonoma unslid IMP `0x1804c8fcc`) and its request routing, rather than forcing
 a synchronize return or treating the deferred fields as the cause.
+
+## Subsequent input and HTTPS regression
+
+Runtime-confirmed through `run_bash.sh`: `/usr/bin/curl -I` against
+`https://www.apple.com` returned HTTP/2 200 and exit 0. The same client against
+`https://expired.badssl.com` returned certificate-expired error 60. These
+checks retain certificate verification; they do not establish Safari support.
+
+The later Control Center click sequence did not hit either the reply-method
+breakpoint at `0x187fd8fcc` or the synchronize return breakpoint at
+`0x18804b5c0`. It is not a valid new preference-write experiment.
+
+Native `task_info(MACH_TASK_BASIC_INFO)` and `proc_pidfdinfo` reported:
+
+```
+59533 task_for_pid 0 task_info 0 suspend_count 0
+59625 task_for_pid 0 task_info 0 suspend_count 0
+59533 socket-info-bytes 792 unix-paths [b'/private/tmp/macws_app_input.59533.sock']
+59625 socket-info-bytes 792 unix-paths [b'/private/tmp/macws_app_input.59625.sock']
+```
+
+Thus neither a remaining task suspension nor a closed input descriptor is
+established as the cause. After restarting System Settings, an exact-window
+desktop-coordinate tap did open Control Center, but subsequent popup taps
+still need a verified delivery witness. Thread snapshots alone do not prove
+that the receiver exited.
+
+Added a diagnostic `APP-INPUT RECEIVE-EXIT` log for non-EINTR receive errors.
+Both library architectures compiled and the three app-input tests passed.
+The temporary pane-local diagnostic library was restored to its saved
+production version; this diagnostic is not a claimed behavior fix.
